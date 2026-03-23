@@ -1,0 +1,16 @@
+# ignore because data
+data/renders
+data/segmentation
+data/flagged.txt
+data/hemorrhage-labels.csv
+data/cases_manifest.csv
+data/subset_metafile.csv
+*.tfrecord
+
+
+# other
+/__pycache__
+*.Rhistory
+*.code-workspace
+.vscode
+test*

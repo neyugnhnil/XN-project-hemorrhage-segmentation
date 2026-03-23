@@ -1,0 +1,37 @@
+{
+  "paths": {
+    "metafile_csv": "data/subset_metafile.csv"
+  },
+  "counts": {
+    "render_images_total": 465389,
+    "classification_ids_total": 752803,
+    "segmentation_ids_total_any_row": 2984,
+    "segmentation_ids_total_usable": 2936,
+    "final_rows": 2929,
+    "final_unique_ids": 2929
+  },
+  "exclusions": {
+    "id_in_flagged": 8,
+    "(id,render_directory)_with_missing_windows": 4620,
+    "id_with_missing_class_label": 0,
+    "id_without_any_seg_labels": 115649,
+    "id_without_usable_seg_labels": 48
+  },
+  "final_metafile_summary": {
+    "segmentation_rows_total": 5488,
+    "segmentation_rows_with_correct": 2393,
+    "segmentation_rows_with_majority_only": 3038,
+    "segmentation_rows_without_usable_polygon": 57
+  },
+  "final_rows_by_render_directory": {
+    "epidural": 473,
+    "intraparenchymal": 969,
+    "multi": 497,
+    "subarachnoid": 500,
+    "subdural": 490
+  },
+  "seg_label_source_counts": {
+    "correct": 1369,
+    "majority": 1560
+  }
+}
