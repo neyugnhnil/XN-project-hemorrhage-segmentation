@@ -1,0 +1,5 @@
+artifacts/
+results/
+splits/
+__pycache__/
+env.yaml
