@@ -41,7 +41,8 @@ import ast
 
 
 ## CONSTANTS ##
-DATA_ROOT = Path("data")
+DATA_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = DATA_ROOT.parent
 METAFILE_CSV = DATA_ROOT / "subset_metafile.csv"
 OUT_TFRECORD = DATA_ROOT / "cases.tfrecord"
 OUT_MANIFEST = DATA_ROOT / "cases_manifest.csv"
@@ -167,7 +168,7 @@ def build_case_arrays(row, image_size: tuple[int, int]):
 
     # create raster map
     for col in WINDOW_PATH_COLUMNS:
-        img = load_grayscale_image(getattr(row, col), image_size)  # [H, W]
+        img = load_grayscale_image(PROJECT_ROOT / getattr(row, col), image_size) # [H, W]
         channels.append(img)
 
     # stack them into x

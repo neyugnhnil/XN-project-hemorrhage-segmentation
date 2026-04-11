@@ -1,6 +1,6 @@
 {
   "paths": {
-    "metafile_csv": "data/subset_metafile.csv"
+    "metafile_csv": "/home/linh/github/XN-project-hemorrhage-segmentation/data/subset_metafile.csv"
   },
   "counts": {
     "render_images_total": 465389,

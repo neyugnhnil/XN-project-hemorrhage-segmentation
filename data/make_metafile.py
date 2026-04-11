@@ -28,7 +28,8 @@ from pathlib import Path
 import pandas as pd
 
 ## CONSTANTS ##
-DATA_ROOT = Path("data")
+DATA_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = DATA_ROOT.parent
 RENDERS_DIR = DATA_ROOT / "renders"
 SEG_DIR = DATA_ROOT / "segmentation"
 LABELS_CSV = DATA_ROOT / "hemorrhage-labels.csv"
@@ -211,8 +212,10 @@ def build_render_inventory() -> pd.DataFrame:
             window_root = class_root / window
 
             for img_path in window_root.glob("*.jpg"):
-                # all files ending in jpg
-                rows.append((img_path.stem, render_directory, window, str(img_path)))
+                # use ROOT-RELATIVE path
+                rel_path = img_path.relative_to(PROJECT_ROOT).as_posix()
+                rows.append((img_path.stem, render_directory, window, rel_path))
+
 
     return pd.DataFrame(rows, columns=["id", "render_directory", "window", "path"])
 

@@ -2,15 +2,17 @@
 data/renders
 data/segmentation
 data/flagged.txt
-data/hemorrhage-labels.csv
-data/cases_manifest.csv
-data/subset_metafile.csv
 *.tfrecord
-
+*.npy
+*.csv
+*.gz
 
 # other
-/__pycache__
+__pycache__
 *.Rhistory
 *.code-workspace
 .vscode
 test*
+otherstuff
+*snakemake
+
