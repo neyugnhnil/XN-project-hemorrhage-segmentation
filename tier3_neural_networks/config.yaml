@@ -56,7 +56,7 @@ multiunet:
   cls_hidden_units: [512]                 # size of dense layer(s) in classification head
   kernel_size: 3                          # convolution window size for conv layers
   dropout_rate: 0.2                       # proportion of dropout layers randomly zeroed
-  use_batch_norm: true
+  use_batch_norm: false
   loss_weight_cls: 0.6                    # multitask loss weight for the classification component  
   loss_weight_seg: 0.4                    # multitask loss weight for the segmentation component
 

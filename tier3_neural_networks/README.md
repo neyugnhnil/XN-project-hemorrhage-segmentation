@@ -75,7 +75,9 @@ Arranged roughly from "code refinement" to "conceptual extension"
 - better documentation and computing environment specs
 - allow toggle for separate pure segmentation fitting (U-Net)
 - more figure printouts, including visual representations from segmentation steps
+- also compute trivial baselines for comparison
 - loss weight tuning for Multitask U-Net
 - more systematic experimental design/evaluation scaffolding
 - revisit classification chains (T1/T2) conceptually in a NN context
 - other hyperparam tuning (should mostly be kept distinct from "Tier 3" work for comparability with T1/T2)
+- make segmentation for Multitask U-Net a more delibeerate intermediate objective by splitting the training into two phases
