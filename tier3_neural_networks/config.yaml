@@ -25,7 +25,7 @@ data:
 
 training:
   # shared training params
-  epochs: 25                      # max number of passes through training set 
+  epochs: 50                      # max number of passes through training set 
   learning_rate: 1E-4             # magnitude of updates during backprop
   early_stopping_patience: 10     # for keras this means allow x conscutive non-improving epochs before stopping
 
@@ -33,31 +33,31 @@ mlp:
   # MLP model-specific params
   batch_size: 4
   pooled_size: [64, 64]           # [H, W] the tensor is downsampled to
-  hidden_units: [1536, 768]       # size of dense layer(s)
-  dropout_rate: 0.2               # proportion of dropout layers randomly zeroed
+  hidden_units: [512, 256]       # size of dense layer(s)
+  dropout_rate: 0.3               # proportion of dropout layers randomly zeroed
   use_batch_norm: true
 
 cnn:
   # CNN model-specific params
   batch_size: 4
-  conv_filters: [16, 32, 64, 128]             # conv filter numbers
+  conv_filters: [8, 16, 32, 64, 128]             # conv filter numbers
   kernel_size: 3                        # convolution window size for conv layers
-  dense_units: [512]                    # size of dense layer(s) after global pooling
-  dropout_rate: 0.2                     # proportion of dropout layers randomly zeroed
+  dense_units: [256]                    # size of dense layer(s) after global pooling
+  dropout_rate: 0.3                     # proportion of dropout layers randomly zeroed
   use_batch_norm: true
   global_pool: avg                      # how feature maps become feature vectors for classification
 
 multiunet:
   # Multitask UNet model-specific params
   batch_size: 2                           # should be smaller than for above; memory-intensive!
-  encoder_filters: [8, 16, 32, 64]             # encoder filter numbers
-  bottleneck_filters: 128                  # bottleneck filter numbers
-  decoder_filters: [64, 32, 16, 8]             # decoder filter numbers
-  cls_hidden_units: [512]                 # size of dense layer(s) in classification head
+  encoder_filters: [16, 32, 64, 128]             # encoder filter numbers
+  bottleneck_filters: 256                  # bottleneck filter numbers
+  decoder_filters: [128, 64, 32, 16]             # decoder filter numbers
+  cls_hidden_units: [256]                 # size of dense layer(s) in classification head
   kernel_size: 3                          # convolution window size for conv layers
-  dropout_rate: 0.2                       # proportion of dropout layers randomly zeroed
+  dropout_rate: 0.3                      # proportion of dropout layers randomly zeroed
   use_batch_norm: false
-  loss_weight_cls: 0.6                    # multitask loss weight for the classification component  
-  loss_weight_seg: 0.4                    # multitask loss weight for the segmentation component
+  loss_weight_cls: 0.5                    # multitask loss weight for the classification component  
+  loss_weight_seg: 0.5                   # multitask loss weight for the segmentation component
 
 # note: loss weight tuning tba, maybe
