@@ -5,11 +5,15 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from shared.config_utils import load_config
+from shared.config_utils import get_model_batch_size, load_config
 from shared.eval_utils import (apply_thresholds, mean_dice_score, summarize_classification_metrics)
 
 from shared.json_and_csv_utils import read_json, write_dataframe, write_json
-from shared.run_model_inference import (run_classification_inference, run_multitask_inference)
+from shared.run_model_inference import (
+    run_attentioncnn_inference,
+    run_classification_inference,
+    run_multitask_inference,
+)
 
 # CLI
 def parse_args() -> argparse.Namespace:
@@ -27,12 +31,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--multiunet-weights", type=str, required=True)
     parser.add_argument("--multiunet-thresholds", type=str, required=True)
 
+    parser.add_argument("--attentioncnn-weights", type=str, default=None)
+    parser.add_argument("--attentioncnn-segmenter-weights", type=str, default=None)
+    parser.add_argument("--attentioncnn-thresholds", type=str, default=None)
+
     parser.add_argument("--metrics-out", type=str, required=True)
     parser.add_argument("--predictions-out", type=str, required=True)
     parser.add_argument("--segmentation-out", type=str, required=True)
     parser.add_argument("--summary-out", type=str, required=True)
 
     return parser.parse_args()
+
+
+def should_evaluate_attentioncnn(args: argparse.Namespace) -> bool:
+    attention_args = [
+        args.attentioncnn_weights,
+        args.attentioncnn_segmenter_weights,
+        args.attentioncnn_thresholds
+        ]
+    if any(value is not None for value in attention_args) and not all(attention_args):
+        raise ValueError(
+            "AttentionCNN evaluation requires --attentioncnn-weights, "
+            "--attentioncnn-segmenter-weights, and --attentioncnn-thresholds"
+            )
+    return all(attention_args)
 
 # get thresholds determined by the calibration step
 def load_thresholds(thresholds_path: str) -> np.ndarray:
@@ -118,7 +140,8 @@ def evaluate_classification_model(
         y_true=y_true,
         y_prob=y_prob,
         y_pred=y_pred,
-        class_names=class_names)
+        class_names=class_names
+        )
 
     metrics_row = build_metrics_row(model_family, metrics)
     prediction_rows = build_prediction_rows(
@@ -127,7 +150,8 @@ def evaluate_classification_model(
         y_true=y_true,
         y_prob=y_prob,
         y_pred=y_pred,
-        class_names=class_names)
+        class_names=class_names
+        )
 
     return metrics_row, prediction_rows
 
@@ -183,6 +207,62 @@ def evaluate_multiunet_model(
     return cls_metrics_row, seg_metrics_row, prediction_rows
 
 
+def evaluate_attentioncnn_model(
+    config_path: str,
+    classifier_weights_path: str,
+    segmenter_weights_path: str,
+    thresholds_path: str,
+    test_indices_path: str,
+    batch_size: int,
+    class_names: list[str]) -> tuple[dict, dict, list[dict]]:
+
+    thresholds = load_thresholds(thresholds_path)
+
+    outputs = run_attentioncnn_inference(
+        config_path=config_path,
+        classifier_model_path=classifier_weights_path,
+        segmenter_model_path=segmenter_weights_path,
+        split_indices_path=test_indices_path,
+        batch_size=batch_size
+        )
+
+    y_true_cls = outputs["y_true_cls"]
+    y_prob_cls = outputs["y_prob_cls"]
+    y_pred_cls = apply_thresholds(y_prob_cls, thresholds)
+
+    cls_metrics = summarize_classification_metrics(
+        y_true=y_true_cls,
+        y_prob=y_prob_cls,
+        y_pred=y_pred_cls,
+        class_names=class_names
+        )
+
+    cls_metrics_row = build_metrics_row("attentioncnn", cls_metrics)
+
+    seg_metrics_row = {
+        "model_family": "attentioncnn",
+        "mean_dice_threshold_0p5": float(
+            mean_dice_score(
+                outputs["y_true_seg"],
+                outputs["y_prob_seg"],
+                threshold=0.5,
+                eps=1.0e-7
+                )
+            )
+        }
+
+    prediction_rows = build_prediction_rows(
+        model_family="attentioncnn",
+        metadata=outputs["metadata"],
+        y_true=y_true_cls,
+        y_prob=y_prob_cls,
+        y_pred=y_pred_cls,
+        class_names=class_names
+        )
+
+    return cls_metrics_row, seg_metrics_row, prediction_rows
+
+
 def main() -> None:
     # parse args
     args = parse_args()
@@ -195,6 +275,7 @@ def main() -> None:
     metrics_rows: list[dict] = []
     segmentation_rows: list[dict] = []
     prediction_rows: list[dict] = []
+    models_evaluated = ["mlp", "cnn", "multiunet"]
 
     # evaluate mlp
     mlp_metrics_row, mlp_prediction_rows =\
@@ -204,7 +285,7 @@ def main() -> None:
         weights_path=args.mlp_weights,
         thresholds_path=args.mlp_thresholds,
         test_indices_path=args.test_indices,
-        batch_size=int(cfg["mlp"]["batch_size"]),
+        batch_size=get_model_batch_size(cfg, "mlp"),
         class_names=class_names
         )
     metrics_rows.append(mlp_metrics_row)
@@ -218,9 +299,9 @@ def main() -> None:
             weights_path=args.cnn_weights,
             thresholds_path=args.cnn_thresholds,
             test_indices_path=args.test_indices,
-            batch_size=int(cfg["cnn"]["batch_size"]),
+            batch_size=get_model_batch_size(cfg, "cnn"),
             class_names=class_names
-        )
+            )
     metrics_rows.append(cnn_metrics_row)
     prediction_rows.extend(cnn_prediction_rows)
 
@@ -231,12 +312,29 @@ def main() -> None:
             weights_path=args.multiunet_weights,
             thresholds_path=args.multiunet_thresholds,
             test_indices_path=args.test_indices,
-            batch_size=int(cfg["multiunet"]["batch_size"]),
+            batch_size=get_model_batch_size(cfg, "multiunet"),
             class_names=class_names
-        )
+            )
     metrics_rows.append(multiunet_metrics_row)
     segmentation_rows.append(multiunet_seg_row)
     prediction_rows.extend(multiunet_prediction_rows)
+
+    # evaluate attentioncnn when the workflow passes completed artifacts
+    if should_evaluate_attentioncnn(args):
+        attentioncnn_metrics_row, attentioncnn_seg_row, attentioncnn_prediction_rows =\
+             evaluate_attentioncnn_model(
+                config_path=args.config,
+                classifier_weights_path=args.attentioncnn_weights,
+                segmenter_weights_path=args.attentioncnn_segmenter_weights,
+                thresholds_path=args.attentioncnn_thresholds,
+                test_indices_path=args.test_indices,
+                batch_size=get_model_batch_size(cfg, "attentioncnn"),
+                class_names=class_names
+            )
+        metrics_rows.append(attentioncnn_metrics_row)
+        segmentation_rows.append(attentioncnn_seg_row)
+        prediction_rows.extend(attentioncnn_prediction_rows)
+        models_evaluated.append("attentioncnn")
 
     # convert lists to dfs
     metrics_df = pd.DataFrame(metrics_rows)\
@@ -252,7 +350,7 @@ def main() -> None:
     write_dataframe(segmentation_df, args.segmentation_out)
 
     summary = {
-        "models_evaluated": ["mlp", "cnn", "multiunet"],
+        "models_evaluated": models_evaluated,
         "class_names": class_names,
         "num_prediction_rows": int(len(predictions_df)),
         "num_metric_rows": int(len(metrics_df)),

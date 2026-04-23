@@ -75,8 +75,8 @@ def _serialize_tensor(array: np.ndarray) -> bytes:
 
 ## POLYGON TO MASK ##
 
-def parse_polygon_points(seg_polygon):
-    # takes polygon string and tries its best to make a python list of points
+def parse_polygon_payload(seg_polygon):
+    # takes polygon string and tries its best to make a python polygon payload
 
     s = str(seg_polygon).strip() 
 
@@ -115,10 +115,34 @@ def parse_polygon_points(seg_polygon):
             data = ast.literal_eval(cleaned) # success
             #print("ast useful")
 
-    if not isinstance(data, list):
-        return [] # give up
-
     return data
+
+
+def collect_polygon_point_sets(payload):
+    # Centaur Correct Label values can be nested ROI lists:
+    # [[{x, y}, ...]] or [[], [{x, y}, ...]].
+    # Majority Label values are usually a single flat [{x, y}, ...] polygon.
+    if isinstance(payload, dict):
+        if "x" in payload and "y" in payload:
+            return [[payload]]
+        return []
+
+    if not isinstance(payload, list):
+        return []
+
+    flat_points = [
+        point
+        for point in payload
+        if isinstance(point, dict) and "x" in point and "y" in point
+    ]
+    if flat_points:
+        return [flat_points]
+
+    point_sets = []
+    for item in payload:
+        point_sets.extend(collect_polygon_point_sets(item))
+
+    return point_sets
 
 def polygon_string_to_mask(seg_polygon: str, image_size: tuple[int, int]) -> np.ndarray:
     # convert a polygon string into a binary mask of shape [H, W], dtype float32.
@@ -127,34 +151,28 @@ def polygon_string_to_mask(seg_polygon: str, image_size: tuple[int, int]) -> np.
     width, height = image_size
     mask = np.zeros((height, width), dtype=np.uint8)
 
-    points = parse_polygon_points(seg_polygon)
-    if not points:
+    polygon_point_sets = collect_polygon_point_sets(parse_polygon_payload(seg_polygon))
+    if not polygon_point_sets:
         return mask.astype(np.float32)
 
-    pts = []
-    for p in points:
-        if not isinstance(p, dict):
+    for points in polygon_point_sets:
+        pts = []
+        for p in points:
+            # converts normalized positions to pixel coordinates
+            x = float(p["x"]) * (width - 1)
+            y = float(p["y"]) * (height - 1)
+
+            # avoid spilling
+            x = np.clip(x, 0, width - 1)
+            y = np.clip(y, 0, height - 1)
+
+            pts.append([x, y])
+
+        if len(pts) < 3:
             continue
-        if "x" not in p or "y" not in p:
-            continue
-        
-        # converts normalized positions to pixel coordinates
-        x = float(p["x"]) * (width - 1)
-        y = float(p["y"]) * (height - 1)
 
-        # avoid spilling
-        x = np.clip(x, 0, width - 1)
-        y = np.clip(y, 0, height - 1)
-
-        pts.append([x, y])
-
-    if len(pts) < 3:
-        return mask.astype(np.float32)
-
-    pts = np.array(pts, dtype=np.int32)
-
-    # fill the polygon
-    cv2.fillPoly(mask, [pts], 1)
+        pts = np.array(pts, dtype=np.int32)
+        cv2.fillPoly(mask, [pts], 1)
 
     # return float array
     return mask.astype(np.float32)

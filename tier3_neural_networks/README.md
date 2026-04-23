@@ -16,6 +16,7 @@ Tier 3 reads an already-built TFRecord dataset from `/data` (it does not rebuild
 - mlp.py: non-spatial baseline
 - cnn.py: full-image classifier
 - multiunet.py: multitask segmentation + classification model
+- unet.py: segmentation-only U-Net used by Attention-CNN
 
 `scripts/train_*.py` trains each model family and save frozen weights plus training summaries.
 
@@ -27,13 +28,13 @@ Tier 3 reads an already-built TFRecord dataset from `/data` (it does not rebuild
 
 `rules/` and `Snakefile` define the Snakemake workflow for the full Tier 3 pipeline.
 
-`artifacts/` receives intermediate outputs such as split files, model weights, calibration files, and logs.
+`runs/<run_name>/artifacts/` receives intermediate outputs such as split summaries, model weights, calibration files, and logs.
 
-`results/` receives final evaluation tables and summaries.
+`runs/<run_name>/results/` receives final evaluation tables and summaries.
 
 # Workflow
 - prepare or validate split files
-- train MLP, CNN, and MultiU-Net
+- train MLP, CNN, MultiU-Net, and Attention-CNN
 - freeze weights
 - calibrate classification thresholds on validation
 - evaluate all models on test
@@ -44,17 +45,31 @@ This is meant to be comparable in spirit to work done for the earlier tiers: sam
 
 From inside `tier3-neural-networks/`, most minimally, run:
 
-`snakemake all`
+`snakemake --cores 1 --resources gpu=1 all`
+
+The workflow marks training, calibration, and evaluation jobs as using one GPU. Passing `--resources gpu=1` prevents Snakemake from running two TensorFlow jobs on the same GPU at once.
+
+`config.yaml` controls the run folder via `run_name`. A full run writes to:
+
+```
+runs/<run_name>/
+├── splits/
+├── artifacts/
+└── results/
+```
+
+For a new run name, `scripts/input_prep.py` initializes `runs/<run_name>/splits/` from the canonical split handoff in `splits/`, validates those copied indices, and then all downstream steps use the run-local split files.
 
 (helpful: https://snakemake.readthedocs.io/en/stable/executing/cli.html)
 
 # Main outputs
-- `artifacts/models/...` : trained model weights and training summaries
-- `artifacts/calibration/...` : calibrated thresholds and calibration summaries
-- `results/test_metrics_all_models.csv`
-- `results/test_predictions_all_models.csv`
-- `results/segmentation_metrics_multiunet.csv`
--  `results/evaluation_summary.json`
+- `runs/<run_name>/splits/...` : run-local train/validation/test split files
+- `runs/<run_name>/artifacts/models/...` : trained model weights and training summaries
+- `runs/<run_name>/artifacts/calibration/...` : calibrated thresholds and calibration summaries
+- `runs/<run_name>/results/test_metrics_all_models.csv`
+- `runs/<run_name>/results/test_predictions_all_models.csv`
+- `runs/<run_name>/results/segmentation_metrics_all_models.csv`
+-  `runs/<run_name>/results/evaluation_summary.json`
 
 # Models
 
@@ -66,6 +81,9 @@ A standard image classifier operating on the full 512 x 512 x 4 tensor. It uses 
 
 ## Multitask U-Net
 A multitask model that performs both segmentation and classification. An encoder produces late feature maps, a decoder predicts a soft segmentation "attention" mask, and the classification head uses both globally pooled features and segmentation-weighted pooled features. It outputs 5 classification probabilities plus a 1-channel segmentation mask. This model is intended to test whether segmentation-informed features help classification of hemorrhage types.
+
+## Attention-CNN
+A two-stage model family. First, a segmentation-only U-Net is trained and its predicted soft mask is frozen. Then that mask is applied to the image tensor as `x * (attention_floor + (1 - attention_floor) * mask)`, and a CNN is trained on the masked input. In `config.yaml`, `attentioncnn.segmenter` is initialized to match the Multi-U-Net segmentation settings and `attentioncnn.classifier` is initialized to match the standalone CNN settings, but those values are independent so a later run can deliberately diverge.
 
 # General development directions
 

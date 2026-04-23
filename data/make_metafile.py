@@ -24,6 +24,7 @@ rules:
 """
 
 import json
+import ast
 from pathlib import Path
 import pandas as pd
 
@@ -59,6 +60,44 @@ def is_empty_label(series: pd.Series) -> pd.Series:
     # is this pandas field empty? (including NaN, None, null etc)
     s = series.astype("string").str.strip()
     return s.isna() | s.isin(["", "[]", "nan", "None", "null"])
+
+def parse_polygon_payload(value):
+    # segmentation exports are inconsistent:
+    # Majority Label is usually [{x, y}, ...], while Correct Label is often
+    # nested as [[{x, y}, ...]] or [[], [{x, y}, ...]].
+    if pd.isna(value):
+        return None
+
+    s = str(value).strip()
+    if s in ["", "[]", "nan", "None", "null"]:
+        return None
+
+    candidates = [s]
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        candidates.append(s[1:-1].replace('""', '"'))
+    candidates.append(s.replace('""', '"'))
+
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+        try:
+            return ast.literal_eval(candidate)
+        except Exception:
+            pass
+
+    return None
+
+def count_polygon_points(payload) -> int:
+    if isinstance(payload, dict):
+        return int("x" in payload and "y" in payload)
+    if isinstance(payload, list):
+        return sum(count_polygon_points(item) for item in payload)
+    return 0
+
+def has_usable_polygon_label(series: pd.Series) -> pd.Series:
+    return series.map(lambda value: count_polygon_points(parse_polygon_payload(value)) >= 3)
 
 def safe_numeric(series: pd.Series) -> pd.Series:
     # converts pandas column into numerics, bad values become NaN
@@ -138,9 +177,9 @@ def read_best_segmentation_rows():
         # add all ids from this csv to all_seg_ids
         all_seg_ids.update(df["id"].dropna().astype(str).tolist())
 
-        # boolean masks for correct/majority label presence
-        correct_present = ~is_empty_label(df["Correct Label"])
-        majority_present = ~is_empty_label(df["Majority Label"])
+        # boolean masks for usable correct/majority polygon labels
+        correct_present = has_usable_polygon_label(df["Correct Label"])
+        majority_present = has_usable_polygon_label(df["Majority Label"])
         usable_mask = correct_present | majority_present
 
         # counts for the report

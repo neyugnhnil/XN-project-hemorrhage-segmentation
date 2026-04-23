@@ -1,0 +1,130 @@
+
+---
+title: "Tier 3 Neural Network Models for Hemorrhage Subtype Classification"
+author: Ngoc Linh Nguyen
+output: pdf_document
+---
+
+## Background
+
+This is a report of Tier 3 neural-network models for multi-label intracranial hemorrhage subtype classification from brain CT slices. The five modeled labels are epidural, intraparenchymal, intraventricular, subarachnoid, and subdural hemorrhage. The cohort is hemorrhage-positive by construction, so the `any` hemorrhage label is excluded.
+
+This project follows earlier Tier 1 and Tier 2 experiments by colleague Hridik Punukollu (github.com/punss/brain-ct-hemorrhage) that used the same cohort construction rules and the same train/validation/test split definitions. The shared data-definition process linked rendered CT images, classification labels, and segmentation polygon annotations before modeling. Those earlier tiers did not train on image tensors directly. Instead, each CT slice was represented by a 269-dimensional handcrafted feature vector summarizing intensity histograms, summary statistics, radial zones, thresholded regions, cross-channel differences, and texture. Models were trained in a one-vs-rest framework with per-label threshold calibration on the validation split.
+
+The main Tier 1 result was a Logistic Regression baseline with test macro AUC 0.697, macro AUPRC 0.410, and macro F1 0.441. Tier 2 ensemble and kernel models improved this baseline. Random Forest achieved the highest reported Tier 1/Tier 2 test macro AUC, 0.744, and macro F1, 0.475; XGBoost achieved the highest macro AUPRC, 0.469. Across the earlier tiers, intraventricular hemorrhage was comparatively detectable despite low prevalence, while subarachnoid and subdural hemorrhages were more difficult. Classifier chains did not materially improve performance.
+
+Tier 3 tests whether direct spatial learning from the CT tensors addresses the limitations of the handcrafted representation. The central question is not only whether neural networks improve classification, but whether adding segmentation supervision improves the learned image representation for hemorrhage subtype detection.
+
+## Data
+
+The dataset was constructed from rendered CT images, classification labels, and human segmentation polygon tables. The final cohort contains 2,929 CT slices. Each case is stored as a `512 x 512 x 4` tensor formed from four rendered CT windows: brain-bone, brain, max-contrast, and subdural. Each case also has five binary subtype labels and a binary segmentation mask rasterized from human polygon annotations.
+
+The preparation pipeline retained cases only when all four render windows were available, classification labels were present, and at least one usable segmentation annotation was available. Flagged IDs were excluded. When multiple segmentation annotations were available, the pipeline preferred Correct labels over Majority labels, then higher agreement and read-count fields. The final modeling dataset contains 1,369 cases using Correct segmentation labels and 1,560 cases using Majority labels.
+
+Tier 3 retained the earlier split membership by carrying forward the same case identifiers from the prior metadata split definitions. The resulting split was 2,049 training cases, 440 validation cases, and 440 test cases. The order of cases within each split was shuffled before training so that within-epoch training order was not tied to the original metadata ordering; membership of the train, validation, and test splits was unchanged.
+
+## Methods and Design
+
+The Tier 3 experiment was implemented as a Snakemake-managed workflow. This was useful because model training, threshold calibration, and final evaluation were kept as separate stages with explicit inputs and outputs. The test set was only used in the final evaluation stage.
+
+| Workflow stage | Purpose | Main output |
+| --- | --- | --- |
+| Input preparation | Validate the retained split definitions, confirm cohort membership, and shuffle case order within each split | Training, validation, and test case lists |
+| Model training | Fit each neural architecture on the training split and monitor validation loss | Best saved model weights and training summaries |
+| Threshold calibration | Sweep per-label classification thresholds on the validation split to maximize binary F1 | One threshold per hemorrhage subtype and model |
+| Final evaluation | Apply fixed trained weights and calibrated thresholds to the held-out test split | Test classification metrics, test predictions, and segmentation Dice for MultiU-Net |
+
+Before the final run, experimentation focused mainly on target validity and training behavior rather than broad hyperparameter search. Diagnostic runs checked that split membership was preserved, segmentation masks were non-empty when expected, training order was shuffled, memory use was controlled, and validation losses behaved plausibly. The most important methodological adjustment was changing the MultiU-Net mask objective to Dice plus binary cross-entropy after Dice-only segmentation training proved weak. Model families and multitask loss weights were then held fixed for the reported comparison.
+
+Three final neural model families were evaluated:
+
+| Model | Role in comparison | Input handling | Main architecture | Output |
+| --- | --- | --- | --- | --- |
+| MLP | Non-spatial neural baseline | Downsample `512 x 512 x 4` tensor to `64 x 64`, then flatten | Dense layers with hidden sizes `[512, 256]`, dropout, batch normalization | Five sigmoid classification probabilities |
+| CNN | Spatial image-classification baseline | Full `512 x 512 x 4` tensor | Convolution and pooling blocks with filters `[8, 16, 32, 64, 128]`, global average pooling, dense classification layer | Five sigmoid classification probabilities |
+| MultiU-Net | Multitask segmentation-classification model | Full `512 x 512 x 4` tensor | U-Net style encoder-decoder with encoder filters `[16, 32, 64, 128]`, bottleneck `256`, decoder filters `[128, 64, 32, 16]`, and a classification head using global and segmentation-weighted features | Five sigmoid classification probabilities plus one hemorrhage mask |
+
+The MLP tests whether a neural classifier without explicit spatial structure is sufficient. The CNN tests whether learned spatial filters improve on both the MLP and the earlier handcrafted-feature representation. The MultiU-Net tests whether segmentation supervision can guide classification toward hemorrhage-localized evidence rather than global image correlations.
+
+The training and loss design was kept deliberately simple.
+
+| Component | MLP | CNN | MultiU-Net |
+| --- | --- | --- | --- |
+| Classification loss | Weighted binary cross-entropy | Weighted binary cross-entropy | Weighted binary cross-entropy |
+| Segmentation loss | Not applicable | Not applicable | Dice plus binary cross-entropy |
+| Loss weights | Classification only | Classification only | Classification `0.5`, segmentation `0.5` |
+| Batch size | 16 | 8 | 4 |
+| Batch normalization | Yes | Yes | No |
+| Optimizer | Adam | Adam | Adam |
+| Learning rate | `1e-4` | `1e-4` | `1e-4` |
+| Maximum epochs | 50 | 50 | 50 |
+| Early stopping | Validation-loss patience 5 | Validation-loss patience 5 | Validation-loss patience 5; did not trigger before epoch 50 |
+
+The key loss choice was to keep classification comparable across models while adding mask supervision only where the architecture could use it. Weighted binary cross-entropy addressed subtype imbalance for all classification heads. Dice plus binary cross-entropy was used for the MultiU-Net mask because hemorrhage occupies a small fraction of each image, making plain pixelwise cross-entropy weak for foreground learning. Equal classification and segmentation loss weights avoided an additional task-weight tuning step.
+
+As in the earlier tiers, each model underwent per-label threshold calibration on the validation split, optimizing binary F1 independently for each subtype. Final F1 used those calibrated thresholds; AUC and AUPRC remained threshold-free.
+
+The workflow is documented in the repository: github.com/neyugnhnil/XN-project-hemorrhage-segmentation 
+
+## Results
+
+Tier 3 evaluated 440 held-out test cases for each of the three neural models. Macro-averaged test results are shown below.
+
+| Model | Test macro AUC | Test macro AUPRC | Test macro F1 |
+| --- | ---: | ---: | ---: |
+| MLP | 0.633 | 0.345 | 0.361 |
+| CNN | 0.663 | 0.365 | 0.416 |
+| MultiU-Net | 0.820 | 0.583 | 0.543 |
+
+The ranking was unambiguous. The CNN improved over the MLP by 0.030 macro AUC, 0.020 macro AUPRC, and 0.055 macro F1, indicating a modest gain from preserving spatial structure and using convolutional filters. However, the classifier-only CNN still remained below the strongest Tier 1/Tier 2 handcrafted-feature models. The MultiU-Net was the strongest model by every macro classification metric. Relative to the CNN, it improved macro AUC by 0.157, macro AUPRC by 0.219, and macro F1 by 0.128.
+
+The cross-tier comparison is therefore concentrated in the MultiU-Net result rather than in neural modeling alone.
+
+| Reference model | Tier | Test macro AUC | Test macro AUPRC | Test macro F1 |
+| --- | --- | ---: | ---: | ---: |
+| Logistic Regression | Tier 1 | 0.697 | 0.410 | 0.441 |
+| Random Forest | Tier 2 | 0.744 | 0.469 | 0.475 |
+| XGBoost | Tier 2 | 0.731 | 0.469 | 0.462 |
+| MultiU-Net | Tier 3 | 0.820 | 0.583 | 0.543 |
+
+Relative to the best earlier-tier results, the MultiU-Net improved macro AUC from 0.744 to 0.820, macro AUPRC from 0.469 to 0.583, and macro F1 from 0.475 to 0.543. The largest absolute gain was in AUPRC. This is important because AUPRC is the stricter metric under label imbalance: it reflects whether positive predictions are precise, not only whether positive cases tend to rank above negative cases.
+
+Per-label MultiU-Net test results were:
+
+| Label | AUC | AUPRC | F1 |
+| --- | ---: | ---: | ---: |
+| Epidural | 0.860 | 0.590 | 0.539 |
+| Intraparenchymal | 0.868 | 0.865 | 0.751 |
+| Intraventricular | 0.885 | 0.493 | 0.400 |
+| Subarachnoid | 0.738 | 0.499 | 0.505 |
+| Subdural | 0.748 | 0.469 | 0.522 |
+
+The per-label results show that the macro improvement was not driven by a single subtype. MultiU-Net AUC exceeded 0.85 for epidural, intraparenchymal, and intraventricular hemorrhage. Intraparenchymal hemorrhage was the strongest label overall, with AUPRC 0.865 and F1 0.751; this suggests that the model was not only ranking this subtype well but also making useful positive predictions after thresholding.
+
+Intraventricular hemorrhage had the highest AUC, 0.885, consistent with the earlier tiers where it was comparatively detectable despite low prevalence. Its lower F1, 0.400, indicates a different issue: the model ranked cases well but still struggled to convert that ranking into stable hard predictions. This is plausible for the rarest label, where small threshold or count changes can move F1 substantially.
+
+Subarachnoid and subdural hemorrhages remained the hardest labels by AUC. Their AUPRC and F1 values were nevertheless materially better than the classifier-only neural baselines, and subdural performance improved over the earlier handcrafted-feature ceiling. This partly supports the Tier 3 motivation: spatial supervision appears to help with surface hemorrhage patterns, although it does not eliminate them as failure modes.
+
+The MultiU-Net also produced a mean test Dice score of 0.491 at segmentation threshold 0.5, compared with 0.514 on the validation split. This segmentation metric has no Tier 1/Tier 2 analogue, but the test value being close to validation suggests that the mask output generalized reasonably rather than reflecting a validation-only artifact. The Dice score is not high enough to present the model as a mature segmenter, but it is high enough to support the segmentation head as a meaningful auxiliary task.
+
+Threshold calibration again mattered. Validation macro F1 improved from 0.386 to 0.435 for the MLP, from 0.388 to 0.458 for the CNN, and from 0.585 to 0.624 for the MultiU-Net.
+
+| Model | Validation F1 at 0.5 | Validation F1 after calibration | Gain |
+| --- | ---: | ---: | ---: |
+| MLP | 0.386 | 0.435 | +0.049 |
+| CNN | 0.388 | 0.458 | +0.070 |
+| MultiU-Net | 0.585 | 0.624 | +0.039 |
+
+The calibration gains were smaller for MultiU-Net because its default-threshold performance was already stronger. For the weaker classifiers, calibration partially compensated for poor probability scaling and label imbalance, but it did not close the gap to the multitask model.
+
+## Discussion
+
+The main finding is that direct neural modeling was not sufficient by itself. The MLP was weak, and the CNN only modestly exceeded it. The decisive improvement came from combining image-level classification with segmentation supervision. This supports the interpretation that hemorrhage subtype classification benefits from an inductive bias that localizes image evidence before classification.
+
+The MultiU-Net result also reframes the earlier Tier 1/Tier 2 failure modes. The handcrafted models could rank cases moderately well, but they lost precision under class imbalance and struggled with spatially diffuse surface hemorrhages. The MultiU-Net improved AUPRC most strongly, suggesting that segmentation-guided spatial features help convert ranking signal into more useful positive predictions. The persistence of lower subarachnoid and subdural AUCs indicates that these surface hemorrhages remain difficult even with direct image modeling.
+
+The segmentation result is important but should be interpreted cautiously. A mean Dice score near 0.49 is meaningful for this small-foreground task, but it is not high enough to treat the mask output as a polished segmentation product. Its value here is primarily as an auxiliary supervision signal and as evidence that the model is attending to hemorrhage-relevant regions.
+
+Several limitations remain. The cohort contains only hemorrhage-positive cases, so these results do not evaluate normal-versus-hemorrhage screening. The test set has only 440 cases, making per-label F1 unstable for rare labels such as intraventricular hemorrhage. Segmentation labels combine Correct and Majority annotations, so mask quality is heterogeneous. Finally, this is a single retained split rather than a repeated-split or external validation study.
+
+Within those limits, Tier 3 establishes a clear result: the multitask segmentation-classification model outperformed both neural classification baselines and the strongest earlier handcrafted-feature models. The report therefore supports moving forward with MultiU-Net as the main Tier 3 model, while treating MLP and CNN as necessary baselines that clarify why spatial localization and segmentation supervision matter.

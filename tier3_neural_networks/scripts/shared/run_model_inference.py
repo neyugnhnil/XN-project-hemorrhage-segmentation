@@ -7,13 +7,13 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
-from shared.config_utils import load_config
-from shared.keras_utils import dice_coefficient, dice_loss
+from shared.config_utils import get_attentioncnn_attention_floor, load_config
+from shared.keras_utils import dice_bce_loss, dice_coefficient, dice_loss
 from shared.tfrecord_utils import build_split_dataset
 
 # load saved keras model
 def load_keras_model(model_path: str | Path, custom_objects: dict[str, Any] | None = None) -> keras.Model:
-    return keras.models.load_model(str(model_path), custom_objects=custom_objects)
+    return keras.models.load_model(str(model_path), custom_objects=custom_objects, compile=False)
 
 # revert metadata tensors to row form
 def _metadata_batch_to_rows(metadata_batch: dict[str, tf.Tensor]) -> list[dict[str, Any]]:
@@ -82,6 +82,42 @@ def collect_multitask_outputs(model: keras.Model, ds: tf.data.Dataset) -> dict[s
         "metadata": metadata_rows
         }
 
+
+def collect_attentioncnn_outputs(
+    segmenter: keras.Model,
+    classifier: keras.Model,
+    ds: tf.data.Dataset,
+    attention_floor: float) -> dict[str, Any]:
+
+    y_true_cls_list: list[np.ndarray] = []
+    y_prob_cls_list: list[np.ndarray] = []
+    y_true_seg_list: list[np.ndarray] = []
+    y_prob_seg_list: list[np.ndarray] = []
+    metadata_rows: list[dict[str, Any]] = []
+
+    for x_batch, y_batch, metadata_batch in ds:
+        y_prob_seg_batch = segmenter.predict_on_batch(x_batch)
+        attention_batch = attention_floor + ((1.0 - attention_floor) * y_prob_seg_batch)
+        x_attention_batch = x_batch * tf.cast(attention_batch, x_batch.dtype)
+        y_prob_cls_batch = classifier.predict_on_batch(x_attention_batch)
+
+        y_true_cls_list.append(y_batch["cls"].numpy())
+        y_prob_cls_list.append(np.asarray(y_prob_cls_batch))
+
+        y_true_seg_list.append(y_batch["seg"].numpy())
+        y_prob_seg_list.append(np.asarray(y_prob_seg_batch))
+
+        metadata_rows.extend(_metadata_batch_to_rows(metadata_batch))
+
+    return {
+        "y_true_cls": np.concatenate(y_true_cls_list, axis=0),
+        "y_prob_cls": np.concatenate(y_prob_cls_list, axis=0),
+        "y_true_seg": np.concatenate(y_true_seg_list, axis=0),
+        "y_prob_seg": np.concatenate(y_prob_seg_list, axis=0),
+        "metadata": metadata_rows
+        }
+
+
 # main inference wrapper for cnn/mlp
 def run_classification_inference(
     config_path: str | Path,
@@ -118,7 +154,43 @@ def run_multitask_inference(
 
     model = load_keras_model(
         model_path,
-        custom_objects={"dice_loss": dice_loss, "dice_coefficient": dice_coefficient}
+        custom_objects={
+            "dice_bce_loss": dice_bce_loss,
+            "dice_loss": dice_loss,
+            "dice_coefficient": dice_coefficient
+            }
         )
 
     return collect_multitask_outputs(model, ds)
+
+
+def run_attentioncnn_inference(
+    config_path: str | Path,
+    classifier_model_path: str | Path,
+    segmenter_model_path: str | Path,
+    split_indices_path: str | Path,
+    batch_size: int) -> dict[str, Any]:
+
+    ds = build_split_dataset(
+        config_path=config_path,
+        split_indices_path=split_indices_path,
+        batch_size=batch_size,
+        shuffle=False,
+        task="multitask",
+        include_metadata=True
+        )
+
+    segmenter = load_keras_model(
+        segmenter_model_path,
+        custom_objects={"dice_loss": dice_loss, "dice_coefficient": dice_coefficient}
+        )
+    classifier = load_keras_model(classifier_model_path)
+    cfg = load_config(config_path)
+    attention_floor = get_attentioncnn_attention_floor(cfg)
+
+    return collect_attentioncnn_outputs(
+        segmenter,
+        classifier,
+        ds,
+        attention_floor=attention_floor
+        )

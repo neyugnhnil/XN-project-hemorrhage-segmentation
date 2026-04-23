@@ -1,5 +1,7 @@
 artifacts/
 results/
 splits/
+runs/
 __pycache__/
 env.yaml
+*.pdf

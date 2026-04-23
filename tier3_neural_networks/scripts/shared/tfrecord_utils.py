@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 
+import struct
+
 import tensorflow as tf
 from shared.config_utils import get_resolved_paths, load_config
 from shared.json_and_csv_utils import read_index_file
+
+META_FEATURE_SPEC = {
+    "meta_index": tf.io.FixedLenFeature([], tf.int64)
+    }
 
 FEATURE_SPEC = {
     "meta_index": tf.io.FixedLenFeature([], tf.int64),
@@ -15,6 +21,80 @@ FEATURE_SPEC = {
     }
 
 # the main export is build_split_dataset()
+
+def get_example_meta_index(example_proto: bytes) -> int:
+    parsed = tf.io.parse_single_example(example_proto, META_FEATURE_SPEC)
+    return int(parsed["meta_index"].numpy())
+
+
+def build_record_location_index(tfrecord_path) -> dict[int, tuple[int, int]]:
+    record_locations = {}
+
+    with open(tfrecord_path, "rb") as f:
+        while True:
+            record_offset = f.tell()
+            length_bytes = f.read(8)
+            if not length_bytes:
+                break
+            if len(length_bytes) != 8:
+                raise ValueError(f"Truncated TFRecord length header in {tfrecord_path}")
+
+            record_length = struct.unpack("<Q", length_bytes)[0]
+            length_crc = f.read(4)
+            record = f.read(record_length)
+            data_crc = f.read(4)
+
+            if len(length_crc) != 4 or len(record) != record_length or len(data_crc) != 4:
+                raise ValueError(f"Truncated TFRecord record in {tfrecord_path}")
+
+            meta_index = get_example_meta_index(record)
+            if meta_index in record_locations:
+                raise ValueError(f"Duplicate meta_index in TFRecord: {meta_index}")
+            record_locations[meta_index] = (record_offset + 12, record_length)
+
+    return record_locations
+
+
+def make_raw_split_dataset(
+    tfrecord_path,
+    meta_indices: list[int],
+    shuffle: bool,
+    seed: int
+    ) -> tf.data.Dataset:
+
+    record_locations = build_record_location_index(tfrecord_path)
+    missing_indices = sorted(set(meta_indices) - set(record_locations))
+    if missing_indices:
+        raise ValueError(
+            "Split contains meta_index values not present in TFRecord, "
+            f"e.g. {missing_indices[:10]}"
+            )
+
+    ds = tf.data.Dataset.from_tensor_slices(tf.constant(meta_indices, dtype=tf.int64))
+
+    if shuffle:
+        # This shuffles tiny integer ids instead of decoded image/mask tensors.
+        ds = ds.shuffle(
+            buffer_size=len(meta_indices),
+            seed=seed,
+            reshuffle_each_iteration=True
+            )
+
+    tfrecord_path = str(tfrecord_path)
+
+    def read_record(meta_index):
+        meta_index = int(meta_index.numpy())
+        record_offset, record_length = record_locations[meta_index]
+        with open(tfrecord_path, "rb") as f:
+            f.seek(record_offset)
+            return f.read(record_length)
+
+    def read_record_tensor(meta_index):
+        record = tf.py_function(read_record, [meta_index], Tout=tf.string)
+        record.set_shape([])
+        return record
+
+    return ds.map(read_record_tensor, num_parallel_calls=tf.data.AUTOTUNE)
 
 def parse_example(
     example_proto: tf.Tensor,
@@ -32,7 +112,7 @@ def parse_example(
     y_cls = tf.io.parse_tensor(parsed["y_cls_raw"], out_type=tf.float32)
     y_seg = tf.io.parse_tensor(parsed["y_seg_raw"], out_type=tf.float32)
 
-    # ensure shapes before dropping any
+    # ensure shapes before dropping "any"
     x = tf.ensure_shape(x, input_shape)
     y_cls = tf.ensure_shape(y_cls, [6])
     y_seg = tf.ensure_shape(y_seg, seg_shape)
@@ -80,7 +160,17 @@ def make_multitask(ds: tf.data.Dataset) -> tf.data.Dataset:
         )
 
 
-def finalize_dataset(ds: tf.data.Dataset, batch_size: int, shuffle: bool, include_metadata: bool)\
+def make_segmentation_only(ds: tf.data.Dataset) -> tf.data.Dataset:
+    return ds.map(
+        lambda x, y, metadata: (x, y["seg"], metadata),
+        num_parallel_calls=tf.data.AUTOTUNE
+        )
+
+
+def finalize_dataset(
+    ds: tf.data.Dataset,
+    batch_size: int,
+    include_metadata: bool)\
      -> tf.data.Dataset:
 
     if not include_metadata:
@@ -88,9 +178,6 @@ def finalize_dataset(ds: tf.data.Dataset, batch_size: int, shuffle: bool, includ
             lambda x, y, metadata: (x, y),
             num_parallel_calls=tf.data.AUTOTUNE
             )
-
-    if shuffle:
-        ds = ds.shuffle(1024)
 
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)
@@ -113,29 +200,34 @@ def build_split_dataset(
     seg_shape = tuple(cfg["data"]["seg_shape"])
     split_indices = read_index_file(split_indices_path)
 
-    # load unbatched dataset with metadata first
-    ds = tf.data.TFRecordDataset(str(resolved_paths["tfrecord"]))
+    # load raw examples by split index order. 
+    # for training, shuffle the integer meta_index stream before reading/parsing
+    ds = make_raw_split_dataset(
+        tfrecord_path=resolved_paths["tfrecord"],
+        meta_indices=split_indices,
+        shuffle=shuffle,
+        seed=int(cfg["seed"])
+        )
+
     ds = ds.map(
         lambda ex: parse_example(ex,input_shape,seg_shape,drop_any=True),
         num_parallel_calls=tf.data.AUTOTUNE
         )
-
-    # keep only examples from this split
-    ds = filter_by_meta_indices(ds, split_indices)
 
     # choose target format for the model family
     if task == "classification":
         ds = make_classification_only(ds)
     elif task == "multitask":
         ds = make_multitask(ds)
+    elif task == "segmentation":
+        ds = make_segmentation_only(ds)
     else:
-        raise ValueError("task must be 'classification' or 'multitask'")
+        raise ValueError("task must be 'classification', 'multitask', or 'segmentation'")
 
     # final batching / metadata stripping
     ds = finalize_dataset(
         ds=ds,
         batch_size=batch_size,
-        shuffle=shuffle,
         include_metadata=include_metadata
         )
 

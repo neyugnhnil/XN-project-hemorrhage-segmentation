@@ -1,15 +1,19 @@
 project_root: .
-seed: 13579 # this does NOT guarantee perfect reproducibility across all TF environments on all hardware
+run_name: post_correct_segmentation_fix
+seed: 1 # this does NOT guarantee perfect reproducibility across all TF environments on all hardware
+
+workflow:
+  model_families:
+    - mlp
+    - cnn
+    - multiunet
 
 paths:
   # overall filesystem layout expected
   tfrecord: ../data/cases.tfrecord                # serialized tf dataset
   manifest: ../data/cases_manifest.csv            # paired with tf dataset, mostly used for split validation
-  train_indices: splits/train_meta_indices.txt    # text file of meta_index values assigned to train
-  val_indices: splits/val_meta_indices.txt        # text file of meta_index values assigned to val
-  test_indices: splits/test_meta_indices.txt      # text file of meta_index values assigned to test
-  artifacts_dir: artifacts                        # where intermediate outputs go
-  results_dir: results                            # where final outputs go
+  split_source_dir: splits                        # canonical split handoff used to initialize named runs
+  runs_dir: runs                                  # named runs write their own splits/artifacts/results here
 
 data:
   # dataset-level constants shared across scripts
@@ -27,20 +31,20 @@ training:
   # shared training params
   epochs: 50                      # max number of passes through training set 
   learning_rate: 1E-4             # magnitude of updates during backprop
-  early_stopping_patience: 10     # for keras this means allow x conscutive non-improving epochs before stopping
+  early_stopping_patience: 5      # for keras this means allow x conscutive non-improving epochs before stopping
 
 mlp:
   # MLP model-specific params
-  batch_size: 4
+  batch_size: 16
   pooled_size: [64, 64]           # [H, W] the tensor is downsampled to
-  hidden_units: [512, 256]       # size of dense layer(s)
+  hidden_units: [512, 256]        # size of dense layer(s)
   dropout_rate: 0.3               # proportion of dropout layers randomly zeroed
   use_batch_norm: true
 
 cnn:
   # CNN model-specific params
-  batch_size: 4
-  conv_filters: [8, 16, 32, 64, 128]             # conv filter numbers
+  batch_size: 8
+  conv_filters: [8, 16, 32, 64, 128]    # conv filter numbers
   kernel_size: 3                        # convolution window size for conv layers
   dense_units: [256]                    # size of dense layer(s) after global pooling
   dropout_rate: 0.3                     # proportion of dropout layers randomly zeroed
@@ -49,15 +53,35 @@ cnn:
 
 multiunet:
   # Multitask UNet model-specific params
-  batch_size: 2                           # should be smaller than for above; memory-intensive!
-  encoder_filters: [16, 32, 64, 128]             # encoder filter numbers
-  bottleneck_filters: 256                  # bottleneck filter numbers
-  decoder_filters: [128, 64, 32, 16]             # decoder filter numbers
+  batch_size: 4                           # should be smaller than for above; memory-intensive!
+  encoder_filters: [16, 32, 64, 128]      # encoder filter numbers
+  bottleneck_filters: 256                 # bottleneck filter numbers
+  decoder_filters: [128, 64, 32, 16]      # decoder filter numbers
   cls_hidden_units: [256]                 # size of dense layer(s) in classification head
   kernel_size: 3                          # convolution window size for conv layers
-  dropout_rate: 0.3                      # proportion of dropout layers randomly zeroed
+  dropout_rate: 0.3                       # proportion of dropout layers randomly zeroed
   use_batch_norm: false
   loss_weight_cls: 0.5                    # multitask loss weight for the classification component  
   loss_weight_seg: 0.5                   # multitask loss weight for the segmentation component
 
-# note: loss weight tuning tba, maybe
+attentioncnn:
+  # two-stage model: segmentation-only U-Net attention mask, then CNN classifier.
+  # these values are initialized to match multiunet's segmentation path and cnn's classifier path.
+  # they live here separately so a later run can deliberately diverge from that comparison schema.
+  attention_floor: 0.25                  # masked input is x * (floor + (1 - floor) * mask)
+  segmenter:
+    batch_size: 2
+    encoder_filters: [16, 32, 64, 128]
+    bottleneck_filters: 256
+    decoder_filters: [128, 64, 32, 16]
+    kernel_size: 3
+    dropout_rate: 0.3
+    use_batch_norm: false
+  classifier:
+    batch_size: 4
+    conv_filters: [8, 16, 32, 64, 128]
+    kernel_size: 3
+    dense_units: [256]
+    dropout_rate: 0.3
+    use_batch_norm: true
+    global_pool: avg

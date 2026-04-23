@@ -69,14 +69,68 @@ def dice_coefficient(y_true: tf.Tensor, y_pred: tf.Tensor, eps: float = 1.0e-7) 
 def dice_loss(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
     return 1.0 - dice_coefficient(y_true, y_pred)
 
+
+def dice_bce_loss(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    bce = keras.losses.binary_crossentropy(y_true, y_pred)
+    return dice_loss(y_true, y_pred) + tf.reduce_mean(bce)
+
+
+def compute_positive_class_weights(
+    ds: tf.data.Dataset,
+    num_classes: int,
+    target_key: str | None = None
+    ) -> list[float]:
+    positive_counts = tf.zeros([num_classes], dtype=tf.float32)
+    total_count = tf.constant(0.0, dtype=tf.float32)
+
+    for _, y_batch in ds:
+        y_cls = y_batch[target_key] if target_key is not None else y_batch
+        y_cls = tf.cast(y_cls, tf.float32)
+        positive_counts += tf.reduce_sum(y_cls, axis=0)
+        total_count += tf.cast(tf.shape(y_cls)[0], tf.float32)
+
+    negative_counts = total_count - positive_counts
+    positive_counts = tf.maximum(positive_counts, 1.0)
+    return [float(weight) for weight in (negative_counts / positive_counts).numpy()]
+
+
+@keras.utils.register_keras_serializable(package="tier3")
+class WeightedBinaryCrossentropy(keras.losses.Loss):
+    def __init__(self, pos_weights: list[float], name: str = "weighted_binary_crossentropy"):
+        super().__init__(name=name)
+        self.pos_weights = [float(weight) for weight in pos_weights]
+        self.pos_weights_tensor = tf.constant(self.pos_weights, dtype=tf.float32)
+
+    def call(self, y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.clip_by_value(tf.cast(y_pred, tf.float32), 1.0e-7, 1.0 - 1.0e-7)
+
+        loss_pos = -y_true * tf.math.log(y_pred) * self.pos_weights_tensor
+        loss_neg = -(1.0 - y_true) * tf.math.log(1.0 - y_pred)
+        return tf.reduce_mean(loss_pos + loss_neg)
+
+    def get_config(self) -> dict:
+        config = super().get_config()
+        config.update({"pos_weights": self.pos_weights})
+        return config
+
 # compilation pathways
 def compile_classification_model(
     model: keras.Model, 
-    learning_rate: float) -> keras.Model:
+    learning_rate: float,
+    class_pos_weights: list[float] | None = None) -> keras.Model:
+
+    loss = (
+        WeightedBinaryCrossentropy(class_pos_weights)
+        if class_pos_weights is not None
+        else "binary_crossentropy"
+        )
 
     model.compile(
         optimizer=make_optimizer(learning_rate),
-        loss="binary_crossentropy"
+        loss=loss
         )
 
     return model
@@ -86,12 +140,31 @@ def compile_multitask_model(
     model: keras.Model, 
     learning_rate: float, 
     loss_weight_cls: float, 
-    loss_weight_seg: float) -> keras.Model:
+    loss_weight_seg: float,
+    class_pos_weights: list[float] | None = None) -> keras.Model:
+
+    cls_loss = (
+        WeightedBinaryCrossentropy(class_pos_weights)
+        if class_pos_weights is not None
+        else "binary_crossentropy"
+        )
 
     model.compile(
         optimizer=make_optimizer(learning_rate),
-        loss={"cls": "binary_crossentropy", "seg": dice_loss},
+        loss={"cls": cls_loss, "seg": dice_bce_loss},
         loss_weights={"cls": loss_weight_cls, "seg": loss_weight_seg}
+        )
+
+    return model
+
+
+def compile_segmentation_model(
+    model: keras.Model,
+    learning_rate: float) -> keras.Model:
+
+    model.compile(
+        optimizer=make_optimizer(learning_rate),
+        loss=dice_loss
         )
 
     return model

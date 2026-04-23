@@ -3,10 +3,14 @@
 import argparse
 import numpy as np
 
-from shared.config_utils import load_config
+from shared.config_utils import get_model_batch_size, load_config
 from shared.eval_utils import (apply_thresholds, macro_f1, per_label_f1, summarize_classification_metrics)
 from shared.json_and_csv_utils import write_json
-from shared.run_model_inference import (run_classification_inference, run_multitask_inference)
+from shared.run_model_inference import (
+    run_attentioncnn_inference,
+    run_classification_inference,
+    run_multitask_inference,
+)
 
 # CLI
 def parse_args() -> argparse.Namespace:
@@ -14,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default="config.yaml")
     parser.add_argument("--model-family", type=str, required=True)
     parser.add_argument("--weights", type=str, required=True)
+    parser.add_argument("--segmenter-weights", type=str, default=None)
     parser.add_argument("--val-indices", type=str, required=True)
     parser.add_argument("--thresholds-out", type=str, required=True)
     parser.add_argument("--summary-out", type=str, required=True)
@@ -65,13 +70,30 @@ def calibrate_thresholds(y_true: np.ndarray, y_prob: np.ndarray) -> tuple[np.nda
     return np.array(optimal_thresholds, dtype=np.float32), optimal_label_f1s
 
 # inference on val dispatcher
-def load_val_outputs(config_path: str, model_family: str, weights_path: str, val_indices_path: str, batch_size: int)\
+def load_val_outputs(
+    config_path: str,
+    model_family: str,
+    weights_path: str,
+    val_indices_path: str,
+    batch_size: int,
+    segmenter_weights_path: str | None = None)\
      -> dict:
 
     if model_family == "multiunet":
         return run_multitask_inference(
             config_path=config_path,
             model_path=weights_path,
+            split_indices_path=val_indices_path,
+            batch_size=batch_size
+            )
+
+    if model_family == "attentioncnn":
+        if segmenter_weights_path is None:
+            raise ValueError("attentioncnn calibration requires --segmenter-weights")
+        return run_attentioncnn_inference(
+            config_path=config_path,
+            classifier_model_path=weights_path,
+            segmenter_model_path=segmenter_weights_path,
             split_indices_path=val_indices_path,
             batch_size=batch_size
             )
@@ -84,7 +106,7 @@ def load_val_outputs(config_path: str, model_family: str, weights_path: str, val
             batch_size=batch_size
             )
 
-    raise ValueError("model_family must be one of: mlp, cnn, multiunet")
+    raise ValueError("model_family must be one of: mlp, cnn, multiunet, attentioncnn")
 
 
 def build_thresh_calibration_summary(
@@ -140,13 +162,15 @@ def main() -> None:
     cfg = load_config(args.config)
     class_names = list(cfg["data"]["class_names"])
     if args.model_family == "mlp":
-        batch_size = int(cfg["mlp"]["batch_size"])
+        batch_size = get_model_batch_size(cfg, "mlp")
     elif args.model_family == "cnn":
-        batch_size = int(cfg["cnn"]["batch_size"])
+        batch_size = get_model_batch_size(cfg, "cnn")
     elif args.model_family == "multiunet":
-        batch_size = int(cfg["multiunet"]["batch_size"])
+        batch_size = get_model_batch_size(cfg, "multiunet")
+    elif args.model_family == "attentioncnn":
+        batch_size = get_model_batch_size(cfg, "attentioncnn")
     else:
-        raise ValueError("model_family must be one of: mlp, cnn, multiunet")
+        raise ValueError("model_family must be one of: mlp, cnn, multiunet, attentioncnn")
 
     # get val inference outputs
     outputs = load_val_outputs(
@@ -154,7 +178,8 @@ def main() -> None:
         model_family=args.model_family,
         weights_path=args.weights,
         val_indices_path=args.val_indices,
-        batch_size=batch_size
+        batch_size=batch_size,
+        segmenter_weights_path=args.segmenter_weights
         )
     y_true = outputs["y_true_cls"]
     y_prob = outputs["y_prob_cls"]

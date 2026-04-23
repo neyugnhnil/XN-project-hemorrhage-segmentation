@@ -9,7 +9,11 @@ from models.cnn import build_cnn
 from shared.config_utils import load_config
 from shared.eval_utils import apply_thresholds, summarize_classification_metrics
 from shared.json_and_csv_utils import write_json, read_index_file
-from shared.keras_utils import compile_classification_model, get_common_callbacks
+from shared.keras_utils import (
+    compile_classification_model,
+    compute_positive_class_weights,
+    get_common_callbacks,
+)
 from shared.run_model_inference import run_classification_inference
 from shared.tfrecord_utils import build_split_dataset
 
@@ -67,7 +71,13 @@ def main() -> None:
         shuffle=True,
         task="classification",
         include_metadata=False
-        ).repeat()
+        )
+
+    class_pos_weights = compute_positive_class_weights(
+        train_ds,
+        num_classes=int(cfg["data"]["num_classes"])
+        )
+    train_ds = train_ds.repeat()
 
     val_ds = build_split_dataset(
         config_path=args.config,
@@ -80,7 +90,11 @@ def main() -> None:
 
     # build model
     model = build_model_from_config(cfg)
-    model = compile_classification_model(model, learning_rate=learning_rate)
+    model = compile_classification_model(
+        model,
+        learning_rate=learning_rate,
+        class_pos_weights=class_pos_weights
+        )
 
     # train model
     start_time = time.perf_counter()
@@ -123,6 +137,7 @@ def main() -> None:
         "epochs_ran": len(history.history.get("loss", [])),
         "learning_rate": learning_rate,
         "batch_size": batch_size,
+        "class_pos_weights": class_pos_weights,
         "train_time_s": round(elapsed_s, 2),
         "history": {k: [float(vv) for vv in v] for k, v in history.history.items()},
         "val_metrics_default_threshold_0p5": val_metrics
