@@ -2,7 +2,7 @@
 ---
 title: "Tier 3 Neural Network Models for Hemorrhage Subtype Classification"
 author: Ngoc Linh Nguyen
-output: rmarkdown::github_document
+output: github_document
 ---
 
 ```{r setup, message=FALSE, warning=FALSE, include=FALSE}

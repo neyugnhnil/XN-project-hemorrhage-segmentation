@@ -3,6 +3,5 @@ results/
 splits/
 runs/
 __pycache__/
-final_report_files/
 *.pdf
 *.Rmd
