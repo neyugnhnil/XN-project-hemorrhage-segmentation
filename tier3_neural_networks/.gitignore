@@ -4,4 +4,4 @@ splits/
 runs/
 __pycache__/
 *.pdf
-*.Rmd
+final_report.Rmd
