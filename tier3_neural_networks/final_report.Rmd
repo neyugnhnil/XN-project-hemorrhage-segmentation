@@ -2,129 +2,732 @@
 ---
 title: "Tier 3 Neural Network Models for Hemorrhage Subtype Classification"
 author: Ngoc Linh Nguyen
-output: pdf_document
+output: rmarkdown::github_document
 ---
+
+```{r setup, message=FALSE, warning=FALSE, include=FALSE}
+
+required <- c("tidyverse", 
+              "ggrepel",
+              "yaml",
+              "jsonlite")
+
+for (lib in required) {
+  if (!requireNamespace(lib, quietly = TRUE)) {
+    install.packages(lib)
+  }
+  library(lib, 
+          character.only = TRUE)
+}
+
+knitr::opts_chunk$set(echo = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      fig.align = "center")
+```
+
+```{r report-helpers, include=FALSE}
+plot_label_size <- 4
+
+report_theme <- theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        strip.text = element_text(size = 12),
+        plot.title = element_text(size = 13),
+        plot.subtitle = element_text(size = 12),
+        plot.title.position = "plot",
+        legend.position = "top")
+
+format_score <- function(x) sprintf("%.3f", x)
+format_gain <- function(x) sprintf("%+.3f", x)
+table_caption <- function(number, text) {
+  cat(paste0("**Table ", number, ". ", text, "**\n\n"))
+}
+
+
+metric_levels <- c("AUC", "AUPRC", "F1")
+metric_palette <- c("AUC" = "#FF34B3",
+                    "AUPRC" = "#00FF7F",
+                    "F1" = "#4169E1")
+
+model_display <- c(mlp = "MLP",
+                   cnn = "CNN",
+                   multiunet = "MultiU-Net",
+                   logistic_regression = "Logistic Regression",
+                   lda = "LDA",
+                   qda = "QDA",
+                   gnb = "GNB",
+                   knn = "KNN",
+                   svm = "SVM",
+                   random_forest = "Random Forest",
+                   xgboost = "XGBoost")
+
+display_model <- function(model_family) {
+  labels <- model_display[model_family]
+  missing <- is.na(labels)
+  labels[missing] <- stringr::str_to_title(stringr::str_replace_all(model_family[missing], "_", " "))
+  unname(labels)
+  }
+
+display_class <- function(class_name) {
+  stringr::str_to_title(stringr::str_replace_all(class_name, "_", " "))
+  }
+
+shape_text <- function(x) paste(x, collapse = " x ")
+list_text <- function(x) paste0("[", paste(x, collapse = ", "), "]")
+yes_no <- function(x) if (isTRUE(x)) "Yes" else "No"
+learning_rate_text <- function(x) paste0("`", format(x, scientific = TRUE, trim = TRUE), "`")
+```
+
+```{r load-artifacts, include=FALSE}
+report_dir <- if (file.exists("config.yaml")) "." else "tier3_neural_networks"
+config <- yaml::read_yaml(file.path(report_dir, "config.yaml"))
+
+run_dir <- file.path(report_dir, config$paths$runs_dir, config$run_name)
+configured_model_families <- config$workflow$model_families
+class_names <- config$data$class_names
+class_display <- stats::setNames(display_class(class_names), class_names)
+model_levels <- display_model(configured_model_families)
+
+read_json <- function(path) jsonlite::fromJSON(path, simplifyVector = TRUE)
+read_json_list <- function(path) jsonlite::fromJSON(path, simplifyVector = FALSE)
+
+test_metrics_raw <- readr::read_csv(file.path(run_dir, "results", "test_metrics_all_models.csv"),
+                                    show_col_types = FALSE)
+segmentation_metrics_raw <- readr::read_csv(file.path(run_dir, "results", "segmentation_metrics_all_models.csv"),
+                                            show_col_types = FALSE)
+evaluation_summary <- read_json(file.path(run_dir, "results", "evaluation_summary.json"))
+split_summary <- read_json(file.path(run_dir, "artifacts", "splits", "split_summary.json"))
+
+tier12_results_dir <- "/home/linh/github/brain-ct-hemorrhage/pipeline/results"
+tier12_test_summary <- read_json_list(file.path(tier12_results_dir, "test_summary.json"))
+tier12_metrics <- purrr::imap_dfr(tier12_test_summary, function(result, model_family) {
+  tibble(
+    model_family = model_family,
+    Model = display_model(model_family),
+    Tier = recode(result$tier, T1 = "Tier 1", T2 = "Tier 2"),
+    AUC = result$macro_auc,
+    AUPRC = result$macro_auprc,
+    F1 = result$macro_f1)})
+
+tier12_score <- function(model, metric) {
+  tier12_metrics %>% filter(Model == model) %>% pull(all_of(metric))
+  }
+
+train_summaries <- stats::setNames(
+  lapply(configured_model_families, function(model_family) {
+    read_json(file.path(run_dir,
+                        "artifacts",
+                        "models",
+                        model_family,
+                        paste0(model_family, "_train_summary.json")))}),
+  configured_model_families
+  )
+
+calibration_summaries <- stats::setNames(
+  lapply(configured_model_families, function(model_family) {
+    read_json(file.path(run_dir,
+                        "artifacts",
+                        "calibration",
+                        model_family,
+                        paste0(model_family, "_calibration_summary.json")))
+    }),
+  configured_model_families
+  )
+
+multiunet_test_dice <- segmentation_metrics_raw %>%
+  filter(model_family == "multiunet") %>%
+  pull(mean_dice_threshold_0p5)
+
+multiunet_val_dice <- train_summaries[["multiunet"]]$val_segmentation_metrics$mean_dice_threshold_0p5
+```
 
 ## Background
 
-This is a report of Tier 3 neural-network models for multi-label intracranial hemorrhage subtype classification from brain CT slices. The five modeled labels are epidural, intraparenchymal, intraventricular, subarachnoid, and subdural hemorrhage. The cohort is hemorrhage-positive by construction, so the `any` hemorrhage label is excluded.
+This is a report of Tier 3 neural-network models for multi-label intracranial hemorrhage subtype classification from brain CT slices. The `r config$data$num_classes` modeled labels are `r paste(class_names, collapse = ", ")` hemorrhage. The cohort is hemorrhage-positive by construction, so the `any` hemorrhage label is excluded.
 
-This project follows earlier Tier 1 and Tier 2 experiments by colleague Hridik Punukollu (github.com/punss/brain-ct-hemorrhage) that used the same cohort construction rules and the same train/validation/test split definitions. The shared data-definition process linked rendered CT images, classification labels, and segmentation polygon annotations before modeling. Those earlier tiers did not train on image tensors directly. Instead, each CT slice was represented by a 269-dimensional handcrafted feature vector summarizing intensity histograms, summary statistics, radial zones, thresholded regions, cross-channel differences, and texture. Models were trained in a one-vs-rest framework with per-label threshold calibration on the validation split.
+This project follows earlier Tier 1 and Tier 2 experiments by Hridik Punukollu (github.com/punss/brain-ct-hemorrhage) that used the same cohort construction rules and the same train/validation/test split definitions. The shared data-definition process linked rendered CT images, classification labels, and segmentation polygon annotations before modeling. Those earlier tiers did not train on image tensors directly. Instead, each CT slice was represented by a 269-dimensional handcrafted feature vector summarizing intensity histograms, summary statistics, radial zones, thresholded regions, cross-channel differences, and texture. Models were trained in a one-vs-rest framework with per-label threshold calibration on the validation split.
 
-The main Tier 1 result was a Logistic Regression baseline with test macro AUC 0.697, macro AUPRC 0.410, and macro F1 0.441. Tier 2 ensemble and kernel models improved this baseline. Random Forest achieved the highest reported Tier 1/Tier 2 test macro AUC, 0.744, and macro F1, 0.475; XGBoost achieved the highest macro AUPRC, 0.469. Across the earlier tiers, intraventricular hemorrhage was comparatively detectable despite low prevalence, while subarachnoid and subdural hemorrhages were more difficult. Classifier chains did not materially improve performance.
+The main Tier 1 result was a Logistic Regression baseline with test macro AUC `r format_score(tier12_score("Logistic Regression", "AUC"))`, macro AUPRC `r format_score(tier12_score("Logistic Regression", "AUPRC"))`, and macro F1 `r format_score(tier12_score("Logistic Regression", "F1"))`. Tier 2 ensemble and kernel models improved this baseline. Random Forest achieved the highest reported Tier 1/Tier 2 test macro AUC, `r format_score(tier12_score("Random Forest", "AUC"))`, and macro F1, `r format_score(tier12_score("Random Forest", "F1"))`; XGBoost achieved the highest macro AUPRC, `r format_score(tier12_score("XGBoost", "AUPRC"))`. Across the earlier tiers, intraventricular hemorrhage was comparatively detectable despite low prevalence, while subarachnoid and subdural hemorrhages were more difficult. Classifier chains did not materially improve performance.
 
-Tier 3 tests whether direct spatial learning from the CT tensors addresses the limitations of the handcrafted representation. The central question is not only whether neural networks improve classification, but whether adding segmentation supervision improves the learned image representation for hemorrhage subtype detection.
+Tier 3 tests whether direct spatial learning from the CT tensors addresses the limitations of the handcrafted representation. The central question is not only whether neural networks improve classification, but whether adding segmentation supervision improves the learned image representation for hemorrhage subtype detection. To keep the comparison meaningful, Tier 3 retains the same case universe, split membership, macro metrics, and validation-threshold calibration strategy used in Tiers 1 and 2. The intended contrast is therefore representation and modeling strategy, not a change in test set or evaluation rules.
 
 ## Data
 
-The dataset was constructed from rendered CT images, classification labels, and human segmentation polygon tables. The final cohort contains 2,929 CT slices. Each case is stored as a `512 x 512 x 4` tensor formed from four rendered CT windows: brain-bone, brain, max-contrast, and subdural. Each case also has five binary subtype labels and a binary segmentation mask rasterized from human polygon annotations.
+The dataset preparation workflow is present in this repository. The dataset was constructed from rendered CT images, classification labels, and human segmentation polygon tables. The final cohort contains `r format(split_summary$counts$manifest, big.mark = ",")` CT slices. Each case is stored in a TensorFlow TFRecord as a `r shape_text(config$data$input_shape)` float tensor formed from four rendered CT windows: brain-bone, brain, max-contrast, and subdural. The same serialized record also contains the six original classification labels, the rasterized `r shape_text(config$data$seg_shape)` binary segmentation target, and metadata fields keyed by `meta_index`. The modeling scripts drop the cohort-level `any` hemorrhage label at parse time, leaving `r config$data$num_classes` subtype labels for classification.
 
 The preparation pipeline retained cases only when all four render windows were available, classification labels were present, and at least one usable segmentation annotation was available. Flagged IDs were excluded. When multiple segmentation annotations were available, the pipeline preferred Correct labels over Majority labels, then higher agreement and read-count fields. The final modeling dataset contains 1,369 cases using Correct segmentation labels and 1,560 cases using Majority labels.
 
-Tier 3 retained the earlier split membership by carrying forward the same case identifiers from the prior metadata split definitions. The resulting split was 2,049 training cases, 440 validation cases, and 440 test cases. The order of cases within each split was shuffled before training so that within-epoch training order was not tied to the original metadata ordering; membership of the train, validation, and test splits was unchanged.
+Splits were defined during the Tier 1/2 workflow, which was based on the TFRecord. Tier 3 retained this split membership by carrying forward the same case identifiers from T1/T2. `scripts/input_prep.py` validates the train, validation, and test `meta_index` files against the manifest, checks for empty files, duplicates, invalid IDs, and split overlap, and then writes run-local split files under `runs/<run_name>/splits/`. If valid handoff files are not available, the script can fall back to a stratified random split by `render_directory`, but this reported run used the provided split source. The resulting split was `r format(split_summary$counts$train, big.mark = ",")` training cases, `r format(split_summary$counts$val, big.mark = ",")` validation cases, and `r format(split_summary$counts$test, big.mark = ",")` test cases. The order of cases within each split was shuffled before training so that within-epoch training order was not tied to the original metadata ordering (membership of the train, validation, and test splits was unchanged).
 
-## Methods and Design
+## Methods
 
-The Tier 3 experiment was implemented as a Snakemake-managed workflow. This was useful because model training, threshold calibration, and final evaluation were kept as separate stages with explicit inputs and outputs. The test set was only used in the final evaluation stage.
+### Experimental Set-up
 
-| Workflow stage | Purpose | Main output |
-| --- | --- | --- |
-| Input preparation | Validate the retained split definitions, confirm cohort membership, and shuffle case order within each split | Training, validation, and test case lists |
-| Model training | Fit each neural architecture on the training split and monitor validation loss | Best saved model weights and training summaries |
-| Threshold calibration | Sweep per-label classification thresholds on the validation split to maximize binary F1 | One threshold per hemorrhage subtype and model |
-| Final evaluation | Apply fixed trained weights and calibrated thresholds to the held-out test split | Test classification metrics, test predictions, and segmentation Dice for MultiU-Net |
+The Tier 3 experiment was implemented as a Snakemake-managed workflow around small Python scripts. This was useful because input preparation, model training, threshold calibration, and final evaluation were kept as separate stages with explicit inputs and outputs. The test set was only used in the final evaluation stage. For comparability with the Tier 1/2 experiments, model selection used the same validation/test split logic and the same macro-averaged AUC, AUPRC, and calibrated-F1 framing, while replacing the 269-dimensional handcrafted feature vector with learned representations from the raw four-channel image tensor.
 
-Before the final run, experimentation focused mainly on target validity and training behavior rather than broad hyperparameter search. Diagnostic runs checked that split membership was preserved, segmentation masks were non-empty when expected, training order was shuffled, memory use was controlled, and validation losses behaved plausibly. The most important methodological adjustment was changing the MultiU-Net mask objective to Dice plus binary cross-entropy after Dice-only segmentation training proved weak. Model families and multitask loss weights were then held fixed for the reported comparison.
+```{r workflow-dag-data-for-figure, include=FALSE}
+workflow_model_lanes <- tibble(model_family = configured_model_families,
+                               Model = display_model(configured_model_families),
+                               y = rev(seq_along(configured_model_families)))
+
+workflow_center_y <- mean(workflow_model_lanes$y)
+
+workflow_dag_nodes <- bind_rows(
+  tibble(node = "input_prep",
+         label = "input_prep\nsplit files",
+         stage = "Input preparation",
+         x = 1,
+         y = workflow_center_y),
+  workflow_model_lanes %>%
+    transmute(node = paste0("train_model_", model_family),
+              label = paste0("train_model\n", Model),
+              stage = "Model training",
+              x = 2,
+              y),
+  workflow_model_lanes %>%
+    transmute(node = paste0("calibrate_model_", model_family),
+              label = paste0("calibrate_model\n", Model),
+              stage = "Threshold calibration",
+              x = 3,
+              y),
+  tibble(node = "evaluate_all",
+         label = "evaluate_all\ntest metrics",
+         stage = "Final evaluation",
+         x = 4,
+         y = workflow_center_y),
+  tibble(node = "all",
+         label = "rule all\nfinal target",
+         stage = "Snakemake target",
+         x = 5,
+         y = workflow_center_y)
+)
+
+workflow_dag_edges <- bind_rows(
+  tibble(from = "input_prep",
+         to = paste0("train_model_", configured_model_families)),
+  tibble(from = paste0("train_model_", configured_model_families),
+         to = paste0("calibrate_model_", configured_model_families)),
+  tibble(from = paste0("calibrate_model_", configured_model_families),
+         to = "evaluate_all"),
+  tibble(from = "evaluate_all",
+         to = "all")
+) %>%
+  left_join(workflow_dag_nodes %>% select(from = node, x, y), by = "from") %>%
+  left_join(workflow_dag_nodes %>% select(to = node, xend = x, yend = y), by = "to")
+```
+
+```{r workflow-dag-figure, fig.width=8, fig.height=4.25, results='asis'}
+# render the Snakemake DAG as a rule graph.
+workflow_node_width <- 0.78
+workflow_node_height <- 0.34
+
+workflow_dag_edges <- workflow_dag_edges %>%
+  mutate(x_start = x + workflow_node_width / 2,
+         x_stop = xend - workflow_node_width / 2)
+
+workflow_dag_plot <- ggplot() +
+  geom_segment(data = workflow_dag_edges,
+               aes(x = x_start, xend = x_stop, y = y, yend = yend),
+               arrow = grid::arrow(length = grid::unit(0.08, "inches"),
+                                   type = "closed"),
+               color = "#4B5563",
+               linewidth = 0.55) +
+  geom_rect(data = workflow_dag_nodes,
+            aes(xmin = x - workflow_node_width / 2,
+                xmax = x + workflow_node_width / 2,
+                ymin = y - workflow_node_height / 2,
+                ymax = y + workflow_node_height / 2,
+                fill = stage),
+            color = "black",
+            linewidth = 0.35) +
+  geom_text(data = workflow_dag_nodes,
+            aes(x = x, y = y, label = label),
+            color = "black",
+            size = plot_label_size,
+            lineheight = 0.9) +
+  annotate("text",
+           x = 1:5,
+           y = max(workflow_dag_nodes$y) + 0.55,
+           label = c("Prepare", "Train", "Calibrate", "Evaluate", "Target"),
+           color = "black",
+           fontface = "bold",
+           size = plot_label_size) +
+  scale_fill_manual(values = c("Input preparation" = "#F2C94C",
+                               "Model training" = "#80CBC4",
+                               "Threshold calibration" = "#93C5FD",
+                               "Final evaluation" = "#FCA5A5",
+                               "Snakemake target" = "#D1D5DB")) +
+  coord_cartesian(xlim = c(0.45, 5.55),
+                  ylim = c(0.55, max(workflow_dag_nodes$y) + 0.8),
+                  clip = "off") +
+  theme_void(base_size = 12) +
+  theme(legend.position = "none",
+        plot.margin = margin(5.5, 14, 5.5, 14))
+
+print(workflow_dag_plot)
+cat('<p align="center"><strong>Fig. 1.</strong> Snakemake DAG for the Tier 3 neural-network workflow.</p>')
+```
+
+The DAG shows the workflow as a sequence of explicit Snakemake rule dependencies. Input preparation produces the retained train, validation, and test split files. Training then fans out across the configured neural model families. Threshold calibration uses each trained model and the validation split, and final evaluation applies the fixed weights and calibrated thresholds to the held-out test split before the default `all` target is satisfied. The corresponding scripts are `scripts/input_prep.py`, `scripts/train_mlp.py`, `scripts/train_cnn.py`, `scripts/train_multiunet.py`, `scripts/calibrate_thresholds.py`, and `scripts/evaluate_all.py`. Common configuration, TFRecord parsing, Keras compilation, inference, and metric helpers live under `scripts/shared/`.
+
+The Python environment was defined by `env.yaml` with Python 3.12, NumPy, pandas, scikit-learn, PyYAML, and Snakemake. Neural training used TensorFlow through the ROCm build (`tensorflow-rocm` 2.19.1) rather than CUDA. The reported run executed on a consumer AMD Radeon RX 6600 GPU, with about 6.8 GiB visible to TensorFlow. Batch sizes were kept model-specific for memory: `r config$mlp$batch_size` for the MLP, `r config$cnn$batch_size` for the CNN, and `r config$multiunet$batch_size` for the MultiU-Net.
+
+The TensorFlow input path is implemented in `scripts/shared/tfrecord_utils.py`. Rather than streaming the full TFRecord sequentially and filtering after decoding, the code first builds a byte-offset index from `meta_index` to each serialized record. Split datasets then shuffle the small integer `meta_index` stream for training, read only the requested records, parse tensors with `tf.io.parse_single_example` and `tf.io.parse_tensor`, enforce the configured tensor shapes, batch examples, and prefetch with `tf.data.AUTOTUNE`. Classification-only models receive `(x, y_cls)` batches, while MultiU-Net receives multitask targets with both `cls` and `seg` outputs.
+
+All neural models were implemented with the Keras functional API and saved as Keras model artifacts. The shared experimental machinery here is the same across model families except where the multitask model requires segmentation targets and a second output. Training uses Adam with learning rate `r learning_rate_text(config$training$learning_rate)`, maximum `r config$training$epochs` epochs, early stopping on validation loss with patience `r config$training$early_stopping_patience`, restoration of the best validation-loss weights, and a Keras model checkpoint for the saved model. The scripts compute positive-class weights from the training split and use custom weighted binary cross-entropy for classification losses. MultiU-Net is compiled with two outputs: weighted binary cross-entropy for classification and Dice plus binary cross-entropy for segmentation, with equal classification and segmentation loss weights.
+
+After training, `scripts/calibrate_thresholds.py` reloads each saved model and sweeps per-label thresholds from 0.05 to 0.95 in 0.01 increments on the validation split, choosing the threshold that maximizes binary F1 for each hemorrhage subtype. This mirrors the earlier-tier treatment of thresholding: AUC and AUPRC evaluate ranking quality without a threshold, while F1 evaluates the hard decision rule after validation-only calibration. `scripts/evaluate_all.py` then reloads the saved weights and calibrated thresholds, runs held-out test inference, writes per-model classification metrics, per-case predictions, and segmentation Dice for MultiU-Net, and computes AUC, AUPRC, and F1 through scikit-learn helper functions.
+
+Before the final run, experimentation focused mainly on target validity and training behavior rather than broad hyperparameter search. Diagnostic runs checked that split membership was preserved, segmentation masks were non-empty when expected, training order was shuffled, memory use was controlled, and validation losses behaved plausibly. The most important methodological adjustment was changing the MultiU-Net mask objective to Dice plus binary cross-entropy after Dice-only segmentation training proved weak. Model families and multitask loss weights were then held fixed for the reported comparison. This restraint is intentional as the point of Tier 3 is to test whether spatial and segmentation-aware representation learning addresses the earlier tiers' limitations, not to win a large architecture or hyperparameter search.
+
+### Final Neural Models
 
 Three final neural model families were evaluated:
 
-| Model | Role in comparison | Input handling | Main architecture | Output |
-| --- | --- | --- | --- | --- |
-| MLP | Non-spatial neural baseline | Downsample `512 x 512 x 4` tensor to `64 x 64`, then flatten | Dense layers with hidden sizes `[512, 256]`, dropout, batch normalization | Five sigmoid classification probabilities |
-| CNN | Spatial image-classification baseline | Full `512 x 512 x 4` tensor | Convolution and pooling blocks with filters `[8, 16, 32, 64, 128]`, global average pooling, dense classification layer | Five sigmoid classification probabilities |
-| MultiU-Net | Multitask segmentation-classification model | Full `512 x 512 x 4` tensor | U-Net style encoder-decoder with encoder filters `[16, 32, 64, 128]`, bottleneck `256`, decoder filters `[128, 64, 32, 16]`, and a classification head using global and segmentation-weighted features | Five sigmoid classification probabilities plus one hemorrhage mask |
+```{r model-family-data, include=FALSE}
+# build architecture descriptions directly from config.yaml.
+model_families <- tibble(model_family = configured_model_families) %>%
+  mutate(
+    Model = display_model(model_family),
+    `Role in comparison` = recode(
+      model_family,
+      mlp = "Non-spatial neural baseline",
+      cnn = "Spatial image-classification baseline",
+      multiunet = "Multitask segmentation-classification model"
+    ),
+    `Input handling` = case_when(
+      model_family == "mlp" ~ paste0("Downsample `",
+                                     shape_text(config$data$input_shape),
+                                     "` tensor to `",
+                                     shape_text(config$mlp$pooled_size),
+                                     "`, then flatten"),
+      TRUE ~ paste0("Full `", shape_text(config$data$input_shape), "` tensor")
+    ),
+    `Main architecture` = case_when(
+      model_family == "mlp" ~ paste0("Dense layers with hidden sizes `",
+                                     list_text(config$mlp$hidden_units),
+                                     "`, dropout, batch normalization"),
+      model_family == "cnn" ~ paste0("Convolution and pooling blocks with filters `",
+                                     list_text(config$cnn$conv_filters),
+                                     "`, global ",
+                                     config$cnn$global_pool,
+                                     " pooling, dense classification layer"),
+      model_family == "multiunet" ~ paste0("U-Net style encoder-decoder with encoder filters `",
+                                           list_text(config$multiunet$encoder_filters),
+                                           "`, bottleneck `",
+                                           config$multiunet$bottleneck_filters,
+                                           "`, decoder filters `",
+                                           list_text(config$multiunet$decoder_filters),
+                                           "`, and a classification head using global and segmentation-weighted features")),
+    Output = if_else(model_family == "multiunet",
+                     paste0(config$data$num_classes,
+                            " sigmoid classification probabilities plus one hemorrhage mask"),
+                     paste0(config$data$num_classes,
+                            " sigmoid classification probabilities"))
+    ) %>%
+  select(Model, `Role in comparison`, `Input handling`, `Main architecture`, Output)
+```
 
-The MLP tests whether a neural classifier without explicit spatial structure is sufficient. The CNN tests whether learned spatial filters improve on both the MLP and the earlier handcrafted-feature representation. The MultiU-Net tests whether segmentation supervision can guide classification toward hemorrhage-localized evidence rather than global image correlations.
+```{r model-family-table, results='asis'}
+table_caption(1, "Neural model families evaluated in Tier 3.")
+
+knitr::kable(model_families,
+             align = c("l", "l", "l", "l", "l"),
+             escape = FALSE)
+```
+
+The three-model design deliberately separates representation questions that were unresolved after Tiers 1 and 2. The MLP is a non-spatial neural baseline: it can combine channel intensities nonlinearly, but downsampling and flattening discard much of the local geometry that distinguishes peripheral, ventricular, and parenchymal hemorrhage patterns. The CNN keeps the full tensor and uses local filters, so it should recover spatial motifs that the MLP cannot. Its tradeoff is that the only supervision is image-level subtype presence, and global pooling can still reward diffuse correlations without forcing the network to identify the hemorrhage region. The MultiU-Net adds a segmentation objective and a segmentation-weighted classification pathway. That gives denser pixel-level supervision and a stronger localization bias, but it also increases memory use, depends on heterogeneous mask annotations, and introduces the possibility that the segmentation and classification losses compete during optimization. This last detail risks causing one component to essentially become meaningless or an active hindrance to the other.
 
 The training and loss design was kept deliberately simple.
 
-| Component | MLP | CNN | MultiU-Net |
-| --- | --- | --- | --- |
-| Classification loss | Weighted binary cross-entropy | Weighted binary cross-entropy | Weighted binary cross-entropy |
-| Segmentation loss | Not applicable | Not applicable | Dice plus binary cross-entropy |
-| Loss weights | Classification only | Classification only | Classification `0.5`, segmentation `0.5` |
-| Batch size | 16 | 8 | 4 |
-| Batch normalization | Yes | Yes | No |
-| Optimizer | Adam | Adam | Adam |
-| Learning rate | `1e-4` | `1e-4` | `1e-4` |
-| Maximum epochs | 50 | 50 | 50 |
-| Early stopping | Validation-loss patience 5 | Validation-loss patience 5 | Validation-loss patience 5; did not trigger before epoch 50 |
+```{r training-design-data, include=FALSE}
 
-The key loss choice was to keep classification comparable across models while adding mask supervision only where the architecture could use it. Weighted binary cross-entropy addressed subtype imbalance for all classification heads. Dice plus binary cross-entropy was used for the MultiU-Net mask because hemorrhage occupies a small fraction of each image, making plain pixelwise cross-entropy weak for foreground learning. Equal classification and segmentation loss weights avoided an additional task-weight tuning step.
+best_epoch <- function(model_family) {
+  train_summary <- train_summaries[[model_family]]
+  val_loss <- train_summary$history$val_loss
 
-As in the earlier tiers, each model underwent per-label threshold calibration on the validation split, optimizing binary F1 independently for each subtype. Final F1 used those calibrated thresholds; AUC and AUPRC remained threshold-free.
+  if (is.null(val_loss) || length(val_loss) == 0) {
+    return(NA_integer_)
+    }
+  
+  which.min(val_loss)
+  }
 
-The workflow is documented in the repository: github.com/neyugnhnil/XN-project-hemorrhage-segmentation 
+stopping_reason <- function(model_family) {
+  train_summary <- train_summaries[[model_family]]
+  
+  if (train_summary$epochs_ran < train_summary$epochs_requested) {
+    "Ran out of patience"
+    } else {
+      "Reached maximum epochs"
+    }
+  }
+
+training_design <- tibble(
+  Component = c("Classification loss",
+                "Segmentation loss",
+                "Loss weights",
+                "Batch size",
+                "Batch normalization",
+                "Optimizer",
+                "Learning rate",
+                "Maximum epochs",
+                "Early stopping patience",
+                "Best epoch",
+                "Stopping reason"),
+  MLP = c("Weighted binary cross-entropy",
+          "Not applicable",
+          "Classification only",
+          as.character(config$mlp$batch_size),
+          yes_no(config$mlp$use_batch_norm),
+          "Adam",
+          learning_rate_text(config$training$learning_rate),
+          as.character(config$training$epochs),
+          as.character(config$training$early_stopping_patience),
+          as.character(best_epoch("mlp")),
+          stopping_reason("mlp")),
+  CNN = c("Weighted binary cross-entropy",
+          "Not applicable",
+          "Classification only",
+          as.character(config$cnn$batch_size),
+          yes_no(config$cnn$use_batch_norm),
+          "Adam",
+          learning_rate_text(config$training$learning_rate),
+          as.character(config$training$epochs),
+          as.character(config$training$early_stopping_patience),
+          as.character(best_epoch("cnn")),
+          stopping_reason("cnn")),
+  `MultiU-Net` = c("Weighted binary cross-entropy",
+                   "Dice plus binary cross-entropy",
+                   paste0("Classification `",
+                          config$multiunet$loss_weight_cls,
+                          "`, segmentation `",
+                          config$multiunet$loss_weight_seg,
+                          "`"),
+                   as.character(config$multiunet$batch_size),
+                   yes_no(config$multiunet$use_batch_norm),
+                   "Adam",
+                   learning_rate_text(config$training$learning_rate),
+                   as.character(config$training$epochs),
+                   as.character(config$training$early_stopping_patience),
+                   as.character(best_epoch("multiunet")),
+                   stopping_reason("multiunet")))
+```
+
+```{r training-design-table, results='asis'}
+table_caption(2, "Training and loss design.")
+
+knitr::kable(training_design,
+             align = c("l", "l", "l", "l"),
+             escape = FALSE)
+```
+
+The key loss choice was to keep classification comparable across models while adding mask supervision only where the architecture could use it. Weighted binary cross-entropy addressed subtype imbalance for all classification heads, serving the same purpose as class weighting in the earlier one-vs-rest models. Dice plus binary cross-entropy was used for the MultiU-Net mask because hemorrhage occupies a small fraction of each image: Dice emphasizes overlap with the small foreground region, while binary cross-entropy stabilizes pixelwise learning and discourages degenerate all-background masks. Equal classification and segmentation loss weights avoided an additional task-weight tuning step, but this is a design compromise rather than a claim of optimal weighting.
+
+As in the earlier tiers, each model underwent per-label threshold calibration on the validation split, optimizing binary F1 independently for each subtype. This keeps the hard-decision comparison aligned with the T1/T2 design and prevents default 0.5 thresholds from dominating conclusions under label imbalance. Final F1 used those calibrated thresholds. 
 
 ## Results
 
-Tier 3 evaluated 440 held-out test cases for each of the three neural models. Macro-averaged test results are shown below.
+Tier 3 evaluated `r format(split_summary$counts$test, big.mark = ",")` held-out test cases for each of the `r length(configured_model_families)` neural models. Macro-averaged test results are shown below.
 
-| Model | Test macro AUC | Test macro AUPRC | Test macro F1 |
-| --- | ---: | ---: | ---: |
-| MLP | 0.633 | 0.345 | 0.361 |
-| CNN | 0.663 | 0.365 | 0.416 |
-| MultiU-Net | 0.820 | 0.583 | 0.543 |
+```{r tier3-macro-data-for-table-and-figure, include=FALSE}
+# shape the Tier 3 test metrics for both the table and bar chart.
+tier3_macro_metrics <- test_metrics_raw %>%
+  transmute(model_family,
+            Model = display_model(model_family),
+            AUC = macro_auc,
+            AUPRC = macro_auprc,
+            F1 = macro_f1) %>%
+  mutate(Model = factor(Model, levels = model_levels)) %>%
+  arrange(Model)
 
-The ranking was unambiguous. The CNN improved over the MLP by 0.030 macro AUC, 0.020 macro AUPRC, and 0.055 macro F1, indicating a modest gain from preserving spatial structure and using convolutional filters. However, the classifier-only CNN still remained below the strongest Tier 1/Tier 2 handcrafted-feature models. The MultiU-Net was the strongest model by every macro classification metric. Relative to the CNN, it improved macro AUC by 0.157, macro AUPRC by 0.219, and macro F1 by 0.128.
+macro_score <- function(model, metric) {
+  tier3_macro_metrics %>%
+    filter(as.character(Model) == model) %>%
+    pull(all_of(metric))
+}
+```
+
+```{r tier3-macro-table, results='asis'}
+table_caption(3, "Macro-averaged test performance for Tier 3 models.")
+
+tier3_macro_metrics %>%
+  mutate(across(c(AUC, AUPRC, F1), format_score)) %>%
+  select(-model_family) %>%
+  rename(`Test macro AUC` = AUC,
+         `Test macro AUPRC` = AUPRC,
+         `Test macro F1` = F1) %>%
+  knitr::kable(align = c("l", "r", "r", "r"),
+               escape = FALSE)
+```
+
+```{r tier3-macro-figure, fig.width=7, fig.height=4, results='asis'}
+# compare all Tier 3 model families across macro AUC, AUPRC, and F1.
+tier3_macro_plot <- tier3_macro_metrics %>%
+  pivot_longer(cols = c(AUC, AUPRC, F1),
+               names_to = "Metric",
+               values_to = "Score") %>%
+  mutate(Metric = factor(Metric, levels = metric_levels)) %>%
+  ggplot(aes(x = Model, y = Score, fill = Metric)) +
+  geom_col(position = position_dodge(width = 0.75),
+           width = 0.68,
+           color = "black",
+           linewidth = 0.35) +
+  geom_text(aes(label = format_score(Score)),
+            position = position_dodge(width = 0.75),
+            vjust = -0.35,
+            size = plot_label_size) +
+  scale_fill_manual(values = metric_palette) +
+  scale_y_continuous(limits = c(0, 0.9),
+                     breaks = seq(0, 0.9, by = 0.1),
+                     expand = expansion(mult = c(0, 0.03))) +
+  labs(x = NULL, y = "Test score", fill = NULL) +
+  report_theme
+
+print(tier3_macro_plot)
+cat('<p align="center"><strong>Fig. 2.</strong> Macro test performance for the three Tier 3 neural models.</p>')
+```
+
+The ranking was unambiguous. The CNN improved over the MLP by `r format_score(macro_score("CNN", "AUC") - macro_score("MLP", "AUC"))` macro AUC, `r format_score(macro_score("CNN", "AUPRC") - macro_score("MLP", "AUPRC"))` macro AUPRC, and `r format_score(macro_score("CNN", "F1") - macro_score("MLP", "F1"))` macro F1, indicating a modest gain from preserving spatial structure and using convolutional filters. However, the classifier-only CNN still remained below the strongest Tier 1/Tier 2 handcrafted-feature models. This is a useful negative result: replacing handcrafted features with a generic image classifier did not by itself solve the precision and surface-hemorrhage problems described in the earlier-Tier work. The CNN had more spatial capacity than the MLP, but its supervision was still only an image-level label vector.
+
+The MultiU-Net was the strongest model by every macro classification metric. Relative to the CNN, it improved macro AUC by `r format_score(macro_score("MultiU-Net", "AUC") - macro_score("CNN", "AUC"))`, macro AUPRC by `r format_score(macro_score("MultiU-Net", "AUPRC") - macro_score("CNN", "AUPRC"))`, and macro F1 by `r format_score(macro_score("MultiU-Net", "F1") - macro_score("CNN", "F1"))`. The largest gain was in AUPRC, the metric that was most problematic in Tiers 1 and 2. That pattern is consistent with the model-design hypothesis: **segmentation supervision appears to improve not only ranking, but the precision of positive subtype predictions under imbalance**.
 
 The cross-tier comparison is therefore concentrated in the MultiU-Net result rather than in neural modeling alone.
 
-| Reference model | Tier | Test macro AUC | Test macro AUPRC | Test macro F1 |
-| --- | --- | ---: | ---: | ---: |
-| Logistic Regression | Tier 1 | 0.697 | 0.410 | 0.441 |
-| Random Forest | Tier 2 | 0.744 | 0.469 | 0.475 |
-| XGBoost | Tier 2 | 0.731 | 0.469 | 0.462 |
-| MultiU-Net | Tier 3 | 0.820 | 0.583 | 0.543 |
+```{r cross-tier-data-for-table-and-figure, include=FALSE}
+# combine Tier 1/2 held-out metrics with Tier 3 results for cross-tier comparison.
+tier3_all_metrics <- tier3_macro_metrics %>%
+  transmute(model_family,
+            Model = as.character(Model),
+            Tier = "Tier 3",
+            AUC,
+            AUPRC,
+            F1)
 
-Relative to the best earlier-tier results, the MultiU-Net improved macro AUC from 0.744 to 0.820, macro AUPRC from 0.469 to 0.583, and macro F1 from 0.475 to 0.543. The largest absolute gain was in AUPRC. This is important because AUPRC is the stricter metric under label imbalance: it reflects whether positive predictions are precise, not only whether positive cases tend to rank above negative cases.
+strongest_models <- c("Logistic Regression", "Random Forest", "XGBoost", "MultiU-Net")
 
-Per-label MultiU-Net test results were:
+cross_tier_all_metrics <- bind_rows(tier12_metrics, tier3_all_metrics) %>%
+  mutate(Model = factor(Model,
+                        levels = c("Logistic Regression",
+                                   "LDA",
+                                   "QDA",
+                                   "GNB",
+                                   "KNN",
+                                   "Random Forest",
+                                   "SVM",
+                                   "XGBoost",
+                                   model_levels)),
+         Tier = factor(Tier, levels = c("Tier 1", "Tier 2", "Tier 3")),
+         In_figure = as.character(Model) %in% strongest_models) %>%
+  arrange(Tier, Model)
 
-| Label | AUC | AUPRC | F1 |
-| --- | ---: | ---: | ---: |
-| Epidural | 0.860 | 0.590 | 0.539 |
-| Intraparenchymal | 0.868 | 0.865 | 0.751 |
-| Intraventricular | 0.885 | 0.493 | 0.400 |
-| Subarachnoid | 0.738 | 0.499 | 0.505 |
-| Subdural | 0.748 | 0.469 | 0.522 |
+cross_tier_metrics <- cross_tier_all_metrics %>%
+  filter(In_figure) %>%
+  select(-In_figure)
 
-The per-label results show that the macro improvement was not driven by a single subtype. MultiU-Net AUC exceeded 0.85 for epidural, intraparenchymal, and intraventricular hemorrhage. Intraparenchymal hemorrhage was the strongest label overall, with AUPRC 0.865 and F1 0.751; this suggests that the model was not only ranking this subtype well but also making useful positive predictions after thresholding.
+best_earlier_score <- function(metric) {
+  cross_tier_metrics %>%
+    filter(Tier != "Tier 3") %>%
+    pull(all_of(metric)) %>%
+    max()
+  }
 
-Intraventricular hemorrhage had the highest AUC, 0.885, consistent with the earlier tiers where it was comparatively detectable despite low prevalence. Its lower F1, 0.400, indicates a different issue: the model ranked cases well but still struggled to convert that ranking into stable hard predictions. This is plausible for the rarest label, where small threshold or count changes can move F1 substantially.
+tier3_score <- function(metric) {
+  cross_tier_metrics %>%
+    filter(Tier == "Tier 3") %>%
+    pull(all_of(metric))
+  }
+```
 
-Subarachnoid and subdural hemorrhages remained the hardest labels by AUC. Their AUPRC and F1 values were nevertheless materially better than the classifier-only neural baselines, and subdural performance improved over the earlier handcrafted-feature ceiling. This partly supports the Tier 3 motivation: spatial supervision appears to help with surface hemorrhage patterns, although it does not eliminate them as failure modes.
+```{r cross-tier-table, results='asis'}
+table_caption(4, "Cross-tier comparison across all models.")
 
-The MultiU-Net also produced a mean test Dice score of 0.491 at segmentation threshold 0.5, compared with 0.514 on the validation split. This segmentation metric has no Tier 1/Tier 2 analogue, but the test value being close to validation suggests that the mask output generalized reasonably rather than reflecting a validation-only artifact. The Dice score is not high enough to present the model as a mature segmenter, but it is high enough to support the segmentation head as a meaningful auxiliary task.
+cross_tier_all_metrics %>%
+  mutate(across(c(AUC, AUPRC, F1), format_score)) %>%
+  mutate(across(c(Model, Tier, AUC, AUPRC, F1),
+                ~ if_else(In_figure, paste0("**", as.character(.x), "**"), as.character(.x)))) %>%
+  select(-model_family, -In_figure) %>%
+  rename(`Test macro AUC` = AUC,
+         `Test macro AUPRC` = AUPRC,
+         `Test macro F1` = F1) %>%
+  knitr::kable(align = c("l", "l", "r", "r", "r"),
+               escape = FALSE)
+```
 
-Threshold calibration again mattered. Validation macro F1 improved from 0.386 to 0.435 for the MLP, from 0.388 to 0.458 for the CNN, and from 0.585 to 0.624 for the MultiU-Net.
+```{r cross-tier-figure, fig.width=7, fig.height=4.5, results='asis'}
+# plot only the strongest reference models.
+cross_tier_plot <- cross_tier_metrics %>%
+  pivot_longer(cols = c(AUC, AUPRC, F1),
+               names_to = "Metric",
+               values_to = "Score") %>%
+  mutate(Metric = factor(Metric, levels = metric_levels)) %>%
+  ggplot(aes(x = Model, y = Score, color = Metric, group = Metric)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 3) +
+  ggrepel::geom_text_repel(aes(label = format_score(Score)),
+                           color = "black",
+                           size = plot_label_size,
+                           min.segment.length = 0.15,
+                           max.overlaps = Inf,
+                           seed = 11,
+                           show.legend = FALSE) +
+  scale_color_manual(values = metric_palette) +
+  scale_y_continuous(limits = c(0.35, 0.87),
+                     breaks = seq(0.35, 0.85, by = 0.10)) +
+  labs(x = NULL, y = "Test score", color = NULL, shape = NULL) +
+  report_theme +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1, size = 12))
 
-| Model | Validation F1 at 0.5 | Validation F1 after calibration | Gain |
-| --- | ---: | ---: | ---: |
-| MLP | 0.386 | 0.435 | +0.049 |
-| CNN | 0.388 | 0.458 | +0.070 |
-| MultiU-Net | 0.585 | 0.624 | +0.039 |
+print(cross_tier_plot)
+cat('<p align="center"><strong>Fig. 3.</strong> Cross-tier macro performance comparison.</p>')
+```
 
-The calibration gains were smaller for MultiU-Net because its default-threshold performance was already stronger. For the weaker classifiers, calibration partially compensated for poor probability scaling and label imbalance, but it did not close the gap to the multitask model.
+Relative to the best earlier-tier results, the MultiU-Net improved macro AUC from `r format_score(best_earlier_score("AUC"))` to `r format_score(tier3_score("AUC"))`, macro AUPRC from `r format_score(best_earlier_score("AUPRC"))` to `r format_score(tier3_score("AUPRC"))`, and macro F1 from `r format_score(best_earlier_score("F1"))` to `r format_score(tier3_score("F1"))`. This comparison is somewhat defensible because the split and metric protocol were carried forward from the T1/T2 work. It is however not a claim of exact comparability, or that the Tier 3 models received identical development effort. The earlier models used randomized hyperparameter search over classical estimators, while Tier 3 used a small, fixed set of neural architectures. The more relevant point is that segmentation-guided spatial learning appears to address the earlier feature-tier ceiling better than either a non-spatial MLP or a classification-only CNN. The largest absolute gain was in AUPRC, which is important because AUPRC is the stricter metric under label imbalance: it reflects whether positive predictions are precise, not only whether positive cases tend to rank above negative cases.
+
+```{r multiunet-label-data-for-heatmap, include=FALSE}
+# extract MultiU-Net per-label metrics from the wide test-metrics row.
+multiunet_test_metrics <- test_metrics_raw %>%
+  filter(model_family == "multiunet") %>%
+  slice(1)
+
+multiunet_label_metrics <- purrr::map_dfr(class_names, function(class_name) {
+  tibble(
+    Label = class_display[[class_name]],
+    AUC = multiunet_test_metrics[[paste0("per_label_auc__", class_name)]],
+    AUPRC = multiunet_test_metrics[[paste0("per_label_auprc__", class_name)]],
+    F1 = multiunet_test_metrics[[paste0("per_label_f1__", class_name)]]
+  )}) %>% mutate(Label = factor(Label, levels = unname(class_display[class_names])))
+
+multiunet_score_range <- multiunet_label_metrics %>%
+  select(AUC, AUPRC, F1) %>%
+  unlist(use.names = FALSE) %>%
+  range(na.rm = TRUE)
+
+multiunet_score_breaks <- c(multiunet_score_range[1],
+                            mean(multiunet_score_range),
+                            multiunet_score_range[2])
+
+label_score <- function(label, metric) {
+  multiunet_label_metrics %>%
+    filter(as.character(Label) == label) %>%
+    pull(all_of(metric))}
+```
+
+```{r multiunet-heatmap, fig.width=7, fig.height=4.5, results='asis'}
+# multiunet metric heatmap
+
+metric_levels <- c("AUC", "AUPRC", "F1")
+multiunet_label_plot <- multiunet_label_metrics %>%
+  pivot_longer(cols = c(AUC, AUPRC, F1),
+               names_to = "Metric",
+               values_to = "Score") %>%
+  mutate(Metric = factor(Metric, levels = metric_levels)) %>%
+  ggplot(aes(x = Metric, y = Label, fill = Score)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(aes(label = format_score(Score)), size = plot_label_size) +
+  scale_fill_gradientn(colors = c("white", "#BFEFFF", "#00BFFF"),
+                       limits = multiunet_score_range,
+                       breaks = multiunet_score_breaks,
+                       labels = multiunet_score_breaks %>% round(digits=1)) +
+  labs(x = NULL, y = NULL, fill = "Score") +
+  report_theme +
+  theme(panel.grid = element_blank())
+
+print(multiunet_label_plot)
+cat('<p align="center"><strong>Fig. 4.</strong> Per-label MultiU-Net test performance.</p>')
+```
+
+The per-label results show that the macro improvement was not driven by a single subtype. MultiU-Net AUC exceeded 0.85 for epidural, intraparenchymal, and intraventricular hemorrhage. Intraparenchymal hemorrhage was the strongest label overall, with AUPRC `r format_score(label_score("Intraparenchymal", "AUPRC"))` and F1 `r format_score(label_score("Intraparenchymal", "F1"))`. Intraventricular hemorrhage had the highest AUC, `r format_score(label_score("Intraventricular", "AUC"))`, consistent with the earlier tiers where it was comparatively detectable despite low prevalence. Its lower F1, `r format_score(label_score("Intraventricular", "F1"))`, indicates that the model ranked cases well but struggled to convert that ranking into stable hard predictions. This is plausible for the rarest label, where small threshold or count changes can move F1 substantially.
+
+Subarachnoid and subdural hemorrhages remained the hardest labels by AUC. Those labels were also noted as difficult in Tier 1/2 work for handcrafted features because their signal is spatially diffuse and peripheral, and a segmentation-guided model does not automatically make subtle surface blood easy. Their AUPRC and F1 values were nevertheless materially better than the classifier-only neural baselines, and subdural performance improved over the earlier handcrafted-feature ceiling. This partly supports the Tier 3 motivation: spatial supervision appears to help with surface hemorrhage patterns, especially for precision-oriented metrics, although it does not eliminate them as failure modes.
+
+The MultiU-Net also produced a mean test Dice score of `r format_score(multiunet_test_dice)` at segmentation threshold 0.5, compared with `r format_score(multiunet_val_dice)` on the validation split. This segmentation metric has no Tier 1/2 analogue, but the test value being close to validation suggests that the mask output generalized reasonably rather than reflecting a validation-only artifact. The Dice score is not high enough to present the model as a "mature" segmenter, but it is high enough to support the segmentation head as a meaningful auxiliary task.
+
+```{r calibration-data, include=FALSE}
+# Gather validation F1 before/after threshold calibration for each Tier 3 model.
+calibration_metrics <- purrr::map_dfr(configured_model_families, function(model_family) {
+  calibration_summary <- calibration_summaries[[model_family]]
+  
+  tibble(
+    Model = display_model(model_family),
+    `Validation F1 at 0.5` = calibration_summary$val_metrics_default_threshold_0p5$macro_f1,
+    `Validation F1 after calibration` = calibration_summary$val_metrics_optimal_thresholds$macro_f1,
+    Gain = calibration_summary$macro_f1_gain
+  )}) %>% mutate(Model = factor(Model, levels = model_levels))
+
+calibration_score <- function(model, column) {
+  calibration_metrics %>%
+    filter(as.character(Model) == model) %>%
+    pull(all_of(column))}
+```
+
+Threshold calibration again mattered. Validation macro F1 improved from `r format_score(calibration_score("MLP", "Validation F1 at 0.5"))` to `r format_score(calibration_score("MLP", "Validation F1 after calibration"))` for the MLP, from `r format_score(calibration_score("CNN", "Validation F1 at 0.5"))` to `r format_score(calibration_score("CNN", "Validation F1 after calibration"))` for the CNN, and from `r format_score(calibration_score("MultiU-Net", "Validation F1 at 0.5"))` to `r format_score(calibration_score("MultiU-Net", "Validation F1 after calibration"))` for the MultiU-Net.
+
+```{r calibration-figure, fig.width=7, fig.height=3.5, results='asis'}
+# Build a dumbbell plot showing F1 movement after threshold calibration.
+calibration_long <- calibration_metrics %>%
+  pivot_longer(cols = c(`Validation F1 at 0.5`,
+                        `Validation F1 after calibration`),
+               names_to = "Threshold",
+               values_to = "Macro F1") %>%
+  mutate(Threshold = recode(Threshold,
+                            `Validation F1 at 0.5` = "Default 0.5",
+                            `Validation F1 after calibration` = "Calibrated"),
+         Threshold = factor(Threshold, levels = c("Default 0.5", "Calibrated")))
+
+calibration_segments <- calibration_metrics %>%
+  mutate(label_x = (`Validation F1 at 0.5` + `Validation F1 after calibration`) / 2)
+
+calibration_plot <- ggplot(calibration_segments, aes(y = Model)) +
+  geom_segment(aes(x = `Validation F1 at 0.5`,
+                   xend = `Validation F1 after calibration`,
+                   yend = Model),
+               color = "#9CA3AF",
+               linewidth = 0.8) +
+  geom_point(data = calibration_long,
+             aes(x = `Macro F1`, color = Threshold),
+             size = 3) +
+  geom_text(data = calibration_long,
+            aes(x = `Macro F1`,
+                label = format_score(`Macro F1`),
+                hjust = if_else(Threshold == "Default 0.5", 1.25, -0.25)),
+            color = "black",
+            size = plot_label_size,
+            show.legend = FALSE) +
+  geom_text(data = calibration_segments,
+            aes(x = label_x,
+                y = Model,
+                label = format_gain(Gain)),
+            inherit.aes = FALSE,
+            nudge_y = 0.18,
+            color = "black",
+            fontface = "bold",
+            size = plot_label_size) +
+  scale_color_manual(values = c("Default 0.5" = "#6B7280",
+                                "Calibrated" = "#D1495B")) +
+  scale_x_continuous(limits = c(0.35, 0.66),
+                     breaks = seq(0.35, 0.65, by = 0.05)) +
+  labs(x = "Validation macro F1", y = NULL, color = NULL) +
+  report_theme
+
+print(calibration_plot)
+cat('<p align="center"><strong>Fig. 5.</strong> Validation macro F1 before and after threshold calibration.</p>')
+```
+
+The calibration gains were smaller for MultiU-Net because its default-threshold performance was already stronger. For the weaker classifiers, calibration partially compensated for poor probability scaling and label imbalance, but it did not close the gap to the multitask model. This mirrors the T1/T2 finding that threshold calibration is necessary but limited: it can choose a better operating point for a learned ranking, but it cannot create spatial evidence that the representation failed to learn.
 
 ## Discussion
 
-The main finding is that direct neural modeling was not sufficient by itself. The MLP was weak, and the CNN only modestly exceeded it. The decisive improvement came from combining image-level classification with segmentation supervision. This supports the interpretation that hemorrhage subtype classification benefits from an inductive bias that localizes image evidence before classification.
+The main finding is not simply that neural networks beat earlier models. Direct neural classification alone was actually not sufficient: the MLP was weak, and the CNN only modestly exceeded it while remaining below the strongest T1/T2 handcrafted-feature models. This matters because the earlier features were not arbitrary tabular summaries; they encoded clinically relevant spatial proxies such as rings, thresholded regions, and texture. A generic CNN had access to the raw image tensor, but it also had to learn useful localization from image-level labels alone. The results suggest that, at this sample size and without an image augmentation step, spatial capacity without explicit localization supervision is not enough.
 
-The MultiU-Net result also reframes the earlier Tier 1/Tier 2 failure modes. The handcrafted models could rank cases moderately well, but they lost precision under class imbalance and struggled with spatially diffuse surface hemorrhages. The MultiU-Net improved AUPRC most strongly, suggesting that segmentation-guided spatial features help convert ranking signal into more useful positive predictions. The persistence of lower subarachnoid and subdural AUCs indicates that these surface hemorrhages remain difficult even with direct image modeling.
+The decisive improvement came from combining image-level classification with segmentation supervision. This supports the theoretical tradeoff built into the MultiU-Net: the model pays a cost in memory, optimization complexity, and dependence on imperfect mask labels, but gains a dense auxiliary task that pushes shared features toward hemorrhage-localized evidence. The fact that the largest cross-tier gain was in AUPRC is especially pertinent. Tiers 1 and 2 could rank cases moderately well, but the precision-recall gap exposed how hard it was to make precise positive predictions under label imbalance. Segmentation-guided features appear to help convert ranking signal into more useful positive predictions.
 
-The segmentation result is important but should be interpreted cautiously. A mean Dice score near 0.49 is meaningful for this small-foreground task, but it is not high enough to treat the mask output as a polished segmentation product. Its value here is primarily as an auxiliary supervision signal and as evidence that the model is attending to hemorrhage-relevant regions.
+The per-label pattern is also consistent with the earlier-Tier experiments. Intraventricular hemorrhage remained comparatively detectable because the signal is anatomically concentrated and visually distinctive. Subarachnoid and subdural hemorrhages remained lower by AUC because thin, peripheral, and spatially diffuse surface blood is intrinsically harder to summarize or localize. The MultiU-Net improved these labels most clearly in precision-oriented terms, but it did not erase the morphology-driven difficulty that appeared in the handcrafted-feature tier.
 
-Several limitations remain. The cohort contains only hemorrhage-positive cases, so these results do not evaluate normal-versus-hemorrhage screening. The test set has only 440 cases, making per-label F1 unstable for rare labels such as intraventricular hemorrhage. Segmentation labels combine Correct and Majority annotations, so mask quality is heterogeneous. Finally, this is a single retained split rather than a repeated-split or external validation study.
+The segmentation result is important but should be interpreted cautiously. A mean Dice score near 0.49 is meaningful for this small-foreground task, but it is not high enough to treat the mask output as a good segmentation product. Its value here is primarily as an auxiliary supervision signal and as evidence that the model is learning a hemorrhage-relevant spatial representation. A true segmenter would require a more direct segmentation study, including a larger dataset of annotation-quality analysis and visual review.
 
-Within those limits, Tier 3 establishes a clear result: the multitask segmentation-classification model outperformed both neural classification baselines and the strongest earlier handcrafted-feature models. The report therefore supports moving forward with MultiU-Net as the main Tier 3 model, while treating MLP and CNN as necessary baselines that clarify why spatial localization and segmentation supervision matter.
+Several limitations remain. The cohort contains only hemorrhage-positive cases, so these results do not evaluate normal-versus-hemorrhage screening. The test set has only 440 cases, making per-label F1 unstable for rare labels such as intraventricular hemorrhage. Segmentation labels combine Correct and Majority annotations, so mask quality is heterogeneous. Finally, this experiment was done with a single retained split rather than a repeated-split or external validation study.
